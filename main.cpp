@@ -6,6 +6,9 @@
 #include <iomanip>
 #include <sstream>
 #include <cstdlib>
+#include <windows.h>
+
+#include "process_manager.cpp"
 
 // Session placeholder for "screen" layouts
 typedef std::chrono::system_clock Clock;
@@ -15,21 +18,32 @@ struct Session {
     int totalLines;
 };
 
+// Handle for the console
+HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+
 // Print ASCII header
 void printHeader() {
+    SetConsoleTextAttribute(hConsole, FOREGROUND_GREEN | FOREGROUND_INTENSITY); // Green color
     std::cout
       << "||======================================||\n"
       << "||            CSOPESY CLI v0.1          ||\n"
       << "||======================================||\n";
+    SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_GREEN); // Reset color
 }
 
-// Cross-platform clear
+// Cross-platform clear using Windows API (if on Windows)
 void clearScreen() {
-#if defined(_WIN32) || defined(_WIN64)
-    std::system("cls");
-#else
-    std::system("clear");
-#endif
+    // Windows-specific screen clear using Windows Console API
+    COORD topLeft = {0, 0};
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    DWORD written;
+    DWORD size;
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    size = csbi.dwSize.X * csbi.dwSize.Y;
+    FillConsoleOutputCharacter(hConsole, ' ', size, topLeft, &written);
+    GetConsoleScreenBufferInfo(hConsole, &csbi);
+    FillConsoleOutputAttribute(hConsole, csbi.wAttributes, size, topLeft, &written);
+    SetConsoleCursorPosition(hConsole, topLeft);
 }
 
 // Trim whitespace
@@ -58,10 +72,26 @@ std::string formatTimestamp(const Clock::time_point &tp) {
 
 // Show session details
 void displaySession(const std::string &name, const Session &s) {
+    SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_INTENSITY); // Blue color for session
     std::cout << "\n=== Screen: " << name << " ===\n"
               << "Process name: " << name << "\n"
               << "Line: " << s.currentLine << " / " << s.totalLines << "\n"
               << "Created: " << formatTimestamp(s.start) << "\n\n";
+    SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_GREEN); // Reset color
+}
+
+// Move cursor to a specific position
+void moveCursorTo(int x, int y) {
+    COORD coord = { static_cast<SHORT>(x), static_cast<SHORT>(y) };
+    SetConsoleCursorPosition(hConsole, coord);
+}
+
+// Function to handle dynamic console output updates
+void updateScreenLayout(int line) {
+    moveCursorTo(0, 10); // Move cursor to row 10, column 0
+    SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_GREEN); // Yellow color (Red + Green)
+    std::cout << "Current Line: " << line << std::endl;
+    SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_GREEN); // Reset color
 }
 
 int main() {
@@ -71,6 +101,7 @@ int main() {
     std::string current;
 
     clearScreen();
+    processSMI();
     printHeader();
 
     std::string line;
@@ -85,7 +116,8 @@ int main() {
         if (cmd == "exit") {
             if (inSession) {
                 inSession = false;
-                clearScreen(); printHeader();
+                clearScreen();
+                printHeader();
                 continue;
             }
             break;
@@ -96,7 +128,8 @@ int main() {
             if (cmd == "initialize") {
                 initialized = true;
                 std::cout << "Initialization successful.\n";
-                clearScreen(); printHeader();
+                clearScreen();
+                printHeader();
             } else {
                 std::cout << "Please run 'initialize' before any other command.\n";
             }
@@ -118,7 +151,8 @@ int main() {
                 std::cout << "report-util command recognized. Doing something.\n";
             }
             else if (cmd == "clear") {
-                clearScreen(); printHeader();
+                clearScreen();
+                printHeader();
             }
             // screen -s <name>: create new session
             else if (cmd.rfind("screen -s ", 0) == 0) {
@@ -153,14 +187,29 @@ int main() {
                     }
                 }
             }
+            else if (cmd == "process-smi") {
+                processSMI();
+            }
             else {
-                std::cout << "Unknown command: '" << cmd << "'. Available: initialize, scheduler-test, scheduler-stop, report-util, clear, exit, screen -s <name>, screen -r <name>.\n";
+                std::cout << "Unknown command: '" << cmd << "'. Available commands are:\n"
+                        << "\n"
+                        << "  - initialize          : Initializes the system for usage.\n"
+                        << "  - scheduler-test      : Runs a test of the scheduler.\n"
+                        << "  - scheduler-stop      : Stops the scheduler.\n"
+                        << "  - report-util         : Displays utility information related to reports.\n"
+                        << "  - clear               : Clears the screen.\n"
+                        << "  - exit                : Exits the program.\n"
+                        << "  - screen -s <name>    : Creates a new screen session with the specified name.\n"
+                        << "  - screen -r <name>    : Reattaches to an existing screen session with the specified name.\n"
+                        << "  - process-smi         : Displays a simulated PROCESS-SMI output.\n"
+                        << "\n"
+                        << "Please check the command spelling or try one of the available commands.\n";
             }
         } else {
             // inside a session: only exit returns
             std::cout << "(In '" << current << "') type 'exit' to return to main menu.\n";
+            updateScreenLayout(42);  // Example dynamic line update
         }
     }
     return 0;
 }
-
