@@ -246,12 +246,62 @@ int main() {
                 if (t.joinable()) t.join();
             workers.clear();
             std::cout << "Scheduler stopped.\n";
-        }
-        else {
+        } else if (cmd == "report-util") {
+
+            std::ofstream ofs("csopesy-log.txt");
+
+            if (!ofs) {
+                std::cerr << "Failed to write report to csopesy-log.txt\n";
+                continue;
+            }
+
+            ofs << "||======================================||\n"
+                << "||         CSOPESY CPU UTIL REPORT      ||\n"
+                << "||======================================||\n\n";
+
+            int coresUsed = config.num_cpu;
+            int running = 0, finished = 0;
+            for (const auto& entry : sessions) {
+                if (entry.second.finished) ++finished;
+                else ++running;
+            }
+
+            ofs << "CPU utilization: " << (coresUsed > 0 ? "100%" : "0%") << "\n";
+            ofs << "Cores used: " << coresUsed << "\n";
+            ofs << "Cores available: " << 0 << "\n\n";
+            ofs << "------------------------------------------\n";
+            ofs << "Running processes:\n";
+            for (const auto& entry : sessions) {
+                if (!entry.second.finished) {
+                    int pid = entry.first;
+                    const Session& s = entry.second;
+                    std::string name = std::string("process") + (pid < 10 ? "0" : "") + std::to_string(pid);
+                    ofs << name << "  (" << fmtTime(s.start) << ")"
+                        << "   Core: " << (pid - 1) % config.num_cpu
+                        << "   " << 0 << " / ????" << "\n"; // TEMPORARY
+                }
+            }
+
+            ofs << "\nFinished processes:\n";
+            for (const auto& entry : sessions) {
+                if (entry.second.finished) {
+                    int pid = entry.first;
+                    const Session& s = entry.second;
+                    std::string name = std::string("process") + (pid < 10 ? "0" : "") + std::to_string(pid);
+                    ofs << name << "  (" << fmtTime(s.start) << ")"
+                        << "   Finished   "
+                        << "???? / ????" << "\n"; // TEMPORARY
+                }
+            }
+
+            ofs << "------------------------------------------\n";
+            ofs.close();
+            std::cout << "Report generated at C:/csopesy-log.txt!\n";
+        } else {
             std::cout << "Unknown cmd: '" << cmd << "'\n";
         }
     }
-
+    
     stopScheduler = true;
     for (int i = 0; i < config.num_cpu; ++i)
         coreCVs[i].notify_all();
