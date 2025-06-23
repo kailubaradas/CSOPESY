@@ -70,17 +70,15 @@ void printConfig(const Config& config) {
     std::cout << "  delays-per-exec: " << config.delays_per_exec << "\n";
 }
 
-const int NUM_CORES = 4;
 const int NUM_PROCESSES = 10;
 const int PRINTS_PER_PROCESS = 100;
 
 std::map<int, Session> sessions;
 std::atomic<bool> stopScheduler(false);
 
-// One queue per core
-std::queue<int> coreQueues[NUM_CORES];
-std::mutex coreMutexes[NUM_CORES];
-std::condition_variable coreCVs[NUM_CORES];
+std::vector<std::queue<int>> coreQueues;
+std::vector<std::mutex> coreMutexes;
+std::vector<std::condition_variable> coreCVs;
 
 std::string formatTimestamp(const Clock::time_point &tp) {
     std::time_t t = Clock::to_time_t(tp);
@@ -129,7 +127,7 @@ void cpuWorker(int coreId) {
 
 void schedulerThread() {
     for (int pid = 1; pid <= NUM_PROCESSES; ++pid) {
-        int assignedCore = (pid - 1) % NUM_CORES;
+        int assignedCore = (pid - 1) % config.num_cpu;
         {
             std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
             coreQueues[assignedCore].push(pid);
@@ -143,7 +141,7 @@ void schedulerThread() {
     }
 
     stopScheduler = true;
-    for (int i = 0; i < NUM_CORES; ++i)
+    for (int i = 0; i < config.num_cpu; ++i)
         coreCVs[i].notify_all();
 }
 
@@ -198,6 +196,10 @@ int main() {
                     continue;
                 }
 
+                coreQueues = std::vector<std::queue<int>>(config.num_cpu);
+                coreMutexes = std::vector<std::mutex>(config.num_cpu);
+                coreCVs = std::vector<std::condition_variable>(config.num_cpu);
+
                 initialized = true;
                 clearScreen(); printHeader();
                 // printConfig(config);
@@ -210,12 +212,12 @@ int main() {
         if (cmd == "scheduler-test") {
             stopScheduler = false;
             sessions.clear();
-            for (int i = 0; i < NUM_CORES; ++i) {
+            for (int i = 0; i < config.num_cpu; ++i) {
                 std::queue<int> empty;
                 std::swap(coreQueues[i], empty);
             }
 
-            for (int i = 0; i < NUM_CORES; ++i)
+            for (int i = 0; i < config.num_cpu; ++i)
                 workers.emplace_back(cpuWorker, i);
             scheduler = std::thread(schedulerThread);
             std::cout << "Started scheduling. Run 'screen -ls' every 1-2s.\n";
@@ -236,7 +238,7 @@ int main() {
         }
         else if (cmd == "scheduler-stop") {
             stopScheduler = true;
-            for (int i = 0; i < NUM_CORES; ++i)
+            for (int i = 0; i < config.num_cpu; ++i)
                 coreCVs[i].notify_all();
 
             if (scheduler.joinable()) scheduler.join();
@@ -251,7 +253,7 @@ int main() {
     }
 
     stopScheduler = true;
-    for (int i = 0; i < NUM_CORES; ++i)
+    for (int i = 0; i < config.num_cpu; ++i)
         coreCVs[i].notify_all();
     if (scheduler.joinable()) scheduler.join();
     for (auto &t : workers)
