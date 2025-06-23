@@ -15,10 +15,60 @@
 #include <atomic>
 
 using Clock = std::chrono::system_clock;
+
 struct Session {
     Clock::time_point start;
     bool finished = false;
 };
+
+struct Config {
+    int num_cpu;
+    std::string scheduler;
+    int quantum_cycles;
+    int batch_process_freq;
+    int min_ins;
+    int max_ins;
+    int delays_per_exec;
+};
+
+Config config;
+
+bool readConfig(const std::string& filename, Config& config) {
+    std::ifstream file(filename.c_str());
+    if (!file) {
+        std::cerr << "Error: Cannot open config file '" << filename << "'\n";
+        return false;
+    }
+
+    std::string key;
+    while (file >> key) {
+        if (key == "num-cpu") file >> config.num_cpu;
+        else if (key == "scheduler") file >> config.scheduler;
+        else if (key == "quantum-cycles") file >> config.quantum_cycles;
+        else if (key == "batch-process-freq") file >> config.batch_process_freq;
+        else if (key == "min-ins") file >> config.min_ins;
+        else if (key == "max-ins") file >> config.max_ins;
+        else if (key == "delays-per-exec") file >> config.delays_per_exec;
+        else {
+            std::string garbage;
+            file >> garbage;
+            std::cerr << "Warning: Unknown config key '" << key << "'. Skipping.\n";
+        }
+    }
+
+    return true;
+}
+
+void printConfig(const Config& config) {
+    std::cout << "Loaded Configuration:\n";
+    std::cout << "  num-cpu: " << config.num_cpu << "\n";
+    std::cout << "  scheduler: " << config.scheduler << "\n";
+    std::cout << "  quantum-cycles: " << config.quantum_cycles << "\n";
+    std::cout << "  batch-process-freq: " << config.batch_process_freq << "\n";
+    std::cout << "  min-ins: " << config.min_ins << "\n";
+    std::cout << "  max-ins: " << config.max_ins << "\n";
+    std::cout << "  delays-per-exec: " << config.delays_per_exec << "\n";
+}
 
 const int NUM_CORES = 4;
 const int NUM_PROCESSES = 10;
@@ -32,7 +82,6 @@ std::queue<int> coreQueues[NUM_CORES];
 std::mutex coreMutexes[NUM_CORES];
 std::condition_variable coreCVs[NUM_CORES];
 
-// Format timestamp with zero-padded hour
 std::string formatTimestamp(const Clock::time_point &tp) {
     std::time_t t = Clock::to_time_t(tp);
     std::tm tm = *std::localtime(&t);
@@ -48,7 +97,6 @@ std::string formatTimestamp(const Clock::time_point &tp) {
     return oss.str();
 }
 
-// Each core only works on its own queue
 void cpuWorker(int coreId) {
     while (!stopScheduler || !coreQueues[coreId].empty()) {
         int pid = -1;
@@ -66,7 +114,7 @@ void cpuWorker(int coreId) {
         if (pid == -1) continue;
 
         std::string fname = (pid < 10 ? "screen_0" : "screen_") + std::to_string(pid) + ".txt";
-        std::ofstream ofs(fname, std::ios::trunc);
+        std::ofstream ofs(fname.c_str(), std::ios::trunc);
         for (int i = 0; i < PRINTS_PER_PROCESS; ++i) {
             auto now = Clock::now();
             ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
@@ -85,7 +133,10 @@ void schedulerThread() {
         {
             std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
             coreQueues[assignedCore].push(pid);
-            sessions[pid] = {Clock::now(), false};
+            Session s;
+            s.start = Clock::now();
+            s.finished = false;
+            sessions[pid] = s;
         }
         coreCVs[assignedCore].notify_one();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -142,8 +193,14 @@ int main() {
 
         if (!initialized) {
             if (cmd == "initialize") {
+                if (!readConfig("config.txt", config)) {
+                    std::cerr << "Initialization failed. Please check config.txt.\n";
+                    continue;
+                }
+
                 initialized = true;
                 clearScreen(); printHeader();
+                // printConfig(config);
             } else {
                 std::cout << "Run 'initialize' first.\n";
             }
