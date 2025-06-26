@@ -112,15 +112,6 @@ void cpuWorker(int coreId) {
 
         if (pid == -1) continue;
 
-        std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
-        std::ofstream ofs(fname.c_str(), std::ios::trunc);
-        for (int i = 0; i < PRINTS_PER_PROCESS; ++i) {
-            auto now = Clock::now();
-            ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
-                << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        ofs.close();
 
         sessions[pid].finished = true;
     }
@@ -293,20 +284,47 @@ int main() {
             continue;
         }
         else if (cmd == "screen -ls") {
-            std::cout << "Finished:\n";
+            int coresUsed = config.num_cpu;
+            int coresAvailable = 0; // All used in this simulation
+
+            // Print header
+            std::cout << "CPU utilization: " << (coresUsed > 0 ? "100%" : "0%") << "\n";
+            std::cout << "Cores used: " << coresUsed << "\n";
+            std::cout << "Cores available: " << coresAvailable << "\n";
+            std::cout << "------------------------------------------\n";
+
+            // Running processes
+            std::cout << "Running processes:\n";
             for (const auto& entry : sessions) {
-                if (entry.second.finished)
-                    std::cout << "  " << processNames[entry.first]
-                              << " (screen_" << (entry.first < 10 ? "0" : "") << entry.first << ")"
-                              << " @ " << fmtTime(entry.second.start) << "\n";
+                if (!entry.second.finished) {
+                    int pid = entry.first;
+                    std::string name = processNames[pid];
+                    std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
+                    int log_count = 0;
+                    std::ifstream ifs(fname);
+                    std::string logline;
+                    while (std::getline(ifs, logline)) log_count++;
+                    int total_lines = PRINTS_PER_PROCESS;
+                    int core = (pid - 1) % config.num_cpu;
+                    std::cout << name << "  (" << fmtTime(entry.second.start) << ")"
+                            << "   Core: " << core
+                            << "   " << log_count << " / " << total_lines << "\n";
+                }
             }
-            std::cout << "Running:\n";
+
+            // Finished processes
+            std::cout << "\nFinished processes:\n";
             for (const auto& entry : sessions) {
-                if (!entry.second.finished)
-                    std::cout << "  " << processNames[entry.first]
-                              << " (screen_" << (entry.first < 10 ? "0" : "") << entry.first << ")"
-                              << " @ " << fmtTime(entry.second.start) << "\n";
+                if (entry.second.finished) {
+                    int pid = entry.first;
+                    std::string name = processNames[pid];
+                    int total_lines = PRINTS_PER_PROCESS;
+                    std::cout << name << "  (" << fmtTime(entry.second.start) << ")"
+                            << "   Finished   "
+                            << total_lines << " / " << total_lines << "\n";
+                }
             }
+            std::cout << "------------------------------------------\n";
         }
         else if (cmd == "scheduler-stop") {
             stopScheduler = true;
