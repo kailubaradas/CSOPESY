@@ -112,6 +112,16 @@ void cpuWorker(int coreId) {
 
         if (pid == -1) continue;
 
+        // Simulate process execution and log writing
+        std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
+        std::ofstream ofs(fname.c_str(), std::ios::trunc);
+        for (int i = 0; i < PRINTS_PER_PROCESS; ++i) {
+            auto now = Clock::now();
+            ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
+                << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        ofs.close();
 
         sessions[pid].finished = true;
     }
@@ -238,32 +248,35 @@ int main() {
             coreCVs[assignedCore].notify_one();
 
             // Enter process screen
+            clearScreen();
+            bool show_menu = true;
             while (true) {
-                clearScreen();
-                std::cout << "Process name: " << processNames[pid] << "\n";
-                std::cout << "ID: " << pid << "\n";
-                std::cout << "Logs:\n";
+                if (show_menu) {
+                    std::cout << "Process name: " << processNames[pid] << "\n";
+                    std::cout << "ID: " << pid << "\n";
+                    std::cout << "Logs:\n";
 
-                // Print logs from file
-                std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
-                std::ifstream ifs(fname);
-                std::string logline;
-                int log_count = 0;
-                while (std::getline(ifs, logline)) {
-                    std::cout << logline << "\n";
-                    log_count++;
-                }
-                ifs.close();
+                    // Print logs from file
+                    std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
+                    std::ifstream ifs(fname);
+                    std::string logline;
+                    int log_count = 0;
+                    while (std::getline(ifs, logline)) {
+                        std::cout << logline << "\n";
+                        log_count++;
+                    }
+                    ifs.close();
 
-                // Show dummy instruction info
-                int current_line = log_count;
-                int total_lines = PRINTS_PER_PROCESS;
-                std::cout << "\nCurrent instruction line: " << current_line << "\n";
-                std::cout << "Lines of code: " << total_lines << "\n";
+                    // Show dummy instruction info
+                    int current_line = log_count;
+                    int total_lines = PRINTS_PER_PROCESS;
+                    std::cout << "\nCurrent instruction line: " << current_line << "\n";
+                    std::cout << "Lines of code: " << total_lines << "\n";
 
-                // If finished, print Finished!
-                if (sessions[pid].finished) {
-                    std::cout << "\nFinished!\n";
+                    // If finished, print Finished!
+                    if (sessions[pid].finished) {
+                        std::cout << "\nFinished!\n";
+                    }
                 }
 
                 std::cout << "\nroot:\\> ";
@@ -273,10 +286,68 @@ int main() {
 
                 if (proc_cmd == "exit") break;
                 else if (proc_cmd == "process-smi") {
+                    show_menu = true; // Refresh menu after this command
                     continue;
                 } else {
                     std::cout << "Unknown command: '" << proc_cmd << "'\n";
                     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    show_menu = false; // Do not reprint menu
+                    continue;
+                }
+                show_menu = true; // Default: show menu after valid commands
+            }
+            clearScreen();
+            printHeader();
+            continue;
+        }
+        else if (cmd.rfind("screen -r ", 0) == 0) {
+            std::string pname = trim(cmd.substr(10));
+            int found_pid = -1;
+            for (const auto& entry : processNames) {
+                if (entry.second == pname && !sessions[entry.first].finished) {
+                    found_pid = entry.first;
+                    break;
+                }
+            }
+            if (found_pid == -1) {
+                std::cout << "Process " << pname << " not found.\n";
+                continue;
+            }
+            clearScreen();
+            // Print process info ONCE
+            std::cout << "Process name: " << processNames[found_pid] << "\n";
+            std::cout << "ID: " << found_pid << "\n";
+            std::cout << "Logs:\n";
+
+            std::string fname = std::string("screen_") + (found_pid < 10 ? "0" : "") + std::to_string(found_pid) + ".txt";
+            std::ifstream ifs(fname);
+            std::string logline;
+            int log_count = 0;
+            while (std::getline(ifs, logline)) {
+                std::cout << logline << "\n";
+                log_count++;
+            }
+            ifs.close();
+
+            int current_line = log_count;
+            int total_lines = PRINTS_PER_PROCESS;
+            std::cout << "\nCurrent instruction line: " << current_line << "\n";
+            std::cout << "Lines of code: " << total_lines << "\n";
+
+            if (sessions[found_pid].finished) {
+                std::cout << "\nFinished!\n";
+            }
+
+            while (true) {
+                std::cout << "\nroot:\\> ";
+                std::string proc_cmd;
+                if (!std::getline(std::cin, proc_cmd)) break;
+                proc_cmd = trim(proc_cmd);
+
+                if (proc_cmd == "exit") break;
+                else {
+                    std::cout << "Only 'exit' is allowed in this mode.\n";
+                    // Do NOT clear or reprint the process info, just print the prompt again
                 }
             }
             clearScreen();
