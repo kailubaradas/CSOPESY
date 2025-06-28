@@ -3,23 +3,22 @@ opesy
 
 ## How to Run the Code
 
-### Option 1: Run the Executable Directly
-1. Make sure `main.exe` is present in this folder.
-2. Double-click `main.exe` or run it from the command prompt:
-   ```cmd
-   main.exe
-   ```
-
-### Option 2: Use the Provided Batch File
-1. Make sure `main.exe` is present in this folder.
+### Option 1: Use the Provided Batch File (Recommended)
+1. Make sure you have `g++` (MinGW or similar) installed and added to your PATH.
 2. Double-click `run.bat` or run it from the command prompt:
    ```cmd
    run.bat
    ```
+   This will compile `main.cpp` and then run the resulting `main.exe`.
 
-This will execute the program as intended.
+### Option 2: Compile and Run Manually
+1. Make sure you have `g++` installed and added to your PATH.
+2. Open a command prompt in this folder and run:
+   ```cmd
+   g++ main.cpp -o main.exe
+   main.exe
+   ```
 
-If you need to recompile `main.cpp`, use a C++ compiler (e.g., g++):
-```cmd
-g++ main.cpp -o main.exe
-```
+**Note:**
+- The `main.exe` file is not included in the repository. You must compile it yourself using the instructions above.
+- If you encounter any errors, ensure that your C++ compiler is properly installed and accessible from the command line.
