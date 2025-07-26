@@ -72,6 +72,9 @@ void printConfig(const Config& config) {
 
 const int NUM_PROCESSES = 10;
 const int PRINTS_PER_PROCESS = 100;
+const int MAX_MEM = 16384;
+const int MEM_PER_PROC = 4096;
+const int MEM_PER_FRAME = 16;
 
 std::map<int, Session> sessions;
 std::map<int, std::string> processNames;
@@ -80,6 +83,16 @@ std::atomic<bool> stopScheduler(false);
 std::vector<std::queue<int>> coreQueues;
 std::vector<std::mutex> coreMutexes;
 std::vector<std::condition_variable> coreCVs;
+
+struct MemoryBlock {
+    int start;
+    int end;
+    int pid;  
+};
+
+std::vector<MemoryBlock> memoryBlocks;  
+std::mutex memoryMutex;
+int snapshotCounter = 0;
 
 std::string formatTimestamp(const Clock::time_point &tp) {
     std::time_t t = Clock::to_time_t(tp);
@@ -126,10 +139,90 @@ void cpuWorker(int coreId) {
     }
 }
 
+bool allocateMemory(int pid) {
+    std::lock_guard<std::mutex> lock(memoryMutex);
+    for (auto it = memoryBlocks.begin(); it != memoryBlocks.end(); ++it) {
+        if (it->pid == -1 && (it->end - it->start + 1) >= MEM_PER_PROC) {
+            int oldEnd = it->end;
+            it->end = it->start + MEM_PER_PROC - 1;
+            it->pid = pid;
+
+            if (it->end < oldEnd) {
+                memoryBlocks.insert(it + 1, {it->end + 1, oldEnd, -1});
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+void freeMemory(int pid) {
+    std::lock_guard<std::mutex> lock(memoryMutex);
+    for (auto& block : memoryBlocks) {
+        if (block.pid == pid) {
+            block.pid = -1;
+        }
+    }
+
+    // Merge adjacent free blocks
+    for (auto it = memoryBlocks.begin(); it != memoryBlocks.end(); ) {
+        if (it != memoryBlocks.begin()) {
+            auto prev = it - 1;
+            if (prev->pid == -1 && it->pid == -1) {
+                prev->end = it->end;
+                it = memoryBlocks.erase(it);
+                continue;
+            }
+        }
+        ++it;
+    }
+}
+
+void snapshotMemory() {
+    std::lock_guard<std::mutex> lock(memoryMutex);
+    std::ofstream ofs("memory_stamp_" + std::to_string(snapshotCounter++) + ".txt");
+
+    // Timestamp
+    auto now = Clock::now();
+    std::time_t t = Clock::to_time_t(now);
+    std::tm tm = *std::localtime(&t);
+    char buffer[64];
+    strftime(buffer, sizeof(buffer), "%m/%d/%Y %I:%M:%S%p", &tm);
+    ofs << "Timestamp: (" << buffer << ")\n";
+
+    // Count processes and fragmentation
+    int procCount = 0;
+    int externalFrag = 0;
+    for (const auto& block : memoryBlocks) {
+        if (block.pid != -1) ++procCount;
+        else if ((block.end - block.start + 1) < MEM_PER_PROC)
+            externalFrag += (block.end - block.start + 1);
+    }
+
+    ofs << "Number of processes in memory: " << procCount << "\n";
+    ofs << "Total external fragmentation in KB: " << externalFrag / 1024 << "\n\n";
+
+    ofs << "----end---- = " << MAX_MEM << "\n\n";
+
+    // Reverse print to match "bottom-up" layout
+    for (auto it = memoryBlocks.rbegin(); it != memoryBlocks.rend(); ++it) {
+        const auto& block = *it;
+        if (block.pid != -1) {
+            ofs << block.end << "\n";
+            ofs << "P" << block.pid << "\n";
+            ofs << block.start << "\n\n";
+        }
+    }
+
+    ofs << "----start----- = 0\n";
+    ofs.close();
+}
+
 void schedulerThread() {
     if (config.scheduler == "rr") {
         // Round Robin Scheduling
         std::queue<int> readyQueue;
+
         for (int pid = 1; pid <= NUM_PROCESSES; ++pid) {
             readyQueue.push(pid);
             Session s;
@@ -138,32 +231,58 @@ void schedulerThread() {
             sessions[pid] = s;
             processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
         }
+
         int currentCore = 0;
+
         while (!readyQueue.empty()) {
+            // === Quantum Cycle Start ===
+
             int pid = readyQueue.front();
             readyQueue.pop();
+
+            bool allocated = allocateMemory(pid);
+            if (!allocated) {
+                // If memory allocation fails, still simulate quantum cycle
+                readyQueue.push(pid);
+                std::this_thread::sleep_for(std::chrono::milliseconds(config.quantum_cycles));
+                snapshotMemory(); // ✅ Snapshot still required this cycle
+                continue;
+            }
+
+            // Allocate CPU core and push process
             {
                 std::lock_guard<std::mutex> lock(coreMutexes[currentCore]);
                 coreQueues[currentCore].push(pid);
             }
+
             coreCVs[currentCore].notify_one();
             std::this_thread::sleep_for(std::chrono::milliseconds(config.quantum_cycles));
-            // If not finished, requeue
+            snapshotMemory(); // ✅ Snapshot for this quantum cycle
+
+            // Requeue if not yet done
             if (!sessions[pid].finished) {
                 readyQueue.push(pid);
+            } else {
+                freeMemory(pid);
             }
+
             currentCore = (currentCore + 1) % config.num_cpu;
+
+            // === Quantum Cycle End ===
         }
+
         stopScheduler = true;
         for (int i = 0; i < config.num_cpu; ++i)
             coreCVs[i].notify_all();
+
     } else {
-        // Default: static assignment
+        // Default: Static assignment (non-RR)
         for (int pid = 1; pid <= NUM_PROCESSES; ++pid) {
             int assignedCore = (pid - 1) % config.num_cpu;
             {
                 std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
                 coreQueues[assignedCore].push(pid);
+
                 Session s;
                 s.start = Clock::now();
                 s.finished = false;
@@ -173,6 +292,7 @@ void schedulerThread() {
             coreCVs[assignedCore].notify_one();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
+
         stopScheduler = true;
         for (int i = 0; i < config.num_cpu; ++i)
             coreCVs[i].notify_all();
@@ -245,6 +365,9 @@ int main() {
             }
             continue;
         }
+
+        memoryBlocks.clear();
+        memoryBlocks.push_back({0, MAX_MEM - 1, -1}); 
 
         if (cmd == "scheduler-test") {
             stopScheduler = false;
