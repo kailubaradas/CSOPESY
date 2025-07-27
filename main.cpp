@@ -19,6 +19,7 @@ using Clock = std::chrono::system_clock;
 struct Session {
     Clock::time_point start;
     bool finished = false;
+    int memorySize = 4096; // Default memory size in bytes
 };
 
 struct Config {
@@ -76,6 +77,10 @@ const int MAX_MEM = 16384;
 const int MEM_PER_PROC = 4096;
 const int MEM_PER_FRAME = 16;
 
+// Memory size validation constants
+const int MIN_MEMORY_SIZE = 64;
+const int MAX_MEMORY_SIZE = 65536;
+
 std::map<int, Session> sessions;
 std::map<int, std::string> processNames;
 std::atomic<bool> stopScheduler(false);
@@ -93,6 +98,55 @@ struct MemoryBlock {
 std::vector<MemoryBlock> memoryBlocks;  
 std::mutex memoryMutex;
 int snapshotCounter = 0;
+
+// Helper function to check if a number is a power of 2
+bool isPowerOfTwo(int n) {
+    return n > 0 && (n & (n - 1)) == 0;
+}
+
+// Helper function to validate memory size
+bool isValidMemorySize(int size) {
+    return size >= MIN_MEMORY_SIZE && size <= MAX_MEMORY_SIZE && isPowerOfTwo(size);
+}
+
+// Helper function to parse screen -s command arguments
+bool parseScreenCommand(const std::string& cmd, std::string& processName, int& memorySize) {
+    // Remove "screen -s " prefix
+    std::string args = cmd.substr(10);
+    
+    // Find the last space to separate process name and memory size
+    size_t lastSpace = args.find_last_of(' ');
+    
+    if (lastSpace == std::string::npos) {
+        // No memory size provided, use default
+        processName = args;
+        memorySize = MEM_PER_PROC; // Default 4096 bytes
+        return true;
+    }
+    
+    processName = args.substr(0, lastSpace);
+    std::string memorySizeStr = args.substr(lastSpace + 1);
+    
+    // Trim whitespace
+    processName.erase(0, processName.find_first_not_of(" \t"));
+    processName.erase(processName.find_last_not_of(" \t") + 1);
+    memorySizeStr.erase(0, memorySizeStr.find_first_not_of(" \t"));
+    memorySizeStr.erase(memorySizeStr.find_last_not_of(" \t") + 1);
+    
+    // Check if process name is empty
+    if (processName.empty()) {
+        return false;
+    }
+    
+    // Try to parse memory size
+    try {
+        memorySize = std::stoi(memorySizeStr);
+    } catch (const std::exception& e) {
+        return false;
+    }
+    
+    return true;
+}
 
 std::string formatTimestamp(const Clock::time_point &tp) {
     std::time_t t = Clock::to_time_t(tp);
@@ -141,10 +195,12 @@ void cpuWorker(int coreId) {
 
 bool allocateMemory(int pid) {
     std::lock_guard<std::mutex> lock(memoryMutex);
+    int requiredMemory = sessions[pid].memorySize;
+    
     for (auto it = memoryBlocks.begin(); it != memoryBlocks.end(); ++it) {
-        if (it->pid == -1 && (it->end - it->start + 1) >= MEM_PER_PROC) {
+        if (it->pid == -1 && (it->end - it->start + 1) >= requiredMemory) {
             int oldEnd = it->end;
-            it->end = it->start + MEM_PER_PROC - 1;
+            it->end = it->start + requiredMemory - 1;
             it->pid = pid;
 
             if (it->end < oldEnd) {
@@ -228,6 +284,7 @@ void schedulerThread() {
             Session s;
             s.start = Clock::now();
             s.finished = false;
+            s.memorySize = MEM_PER_PROC; // Default for scheduler-test
             sessions[pid] = s;
             processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
         }
@@ -286,6 +343,7 @@ void schedulerThread() {
                 Session s;
                 s.start = Clock::now();
                 s.finished = false;
+                s.memorySize = MEM_PER_PROC; // Default for scheduler-test
                 sessions[pid] = s;
                 processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
             }
@@ -338,6 +396,10 @@ int main() {
 
     clearScreen(); printHeader();
 
+    // Initialize memory blocks once when the system starts
+    memoryBlocks.clear();
+    memoryBlocks.push_back({0, MAX_MEM - 1, -1});
+
     while (true) {
         std::cout << "Main> ";
         if (!std::getline(std::cin, line)) break;
@@ -345,6 +407,9 @@ int main() {
         if (cmd.empty()) continue;
 
         if (cmd == "exit") break;
+
+        // Debug output to see what command is being processed
+        // std::cout << "Processing command: '" << cmd << "'" << std::endl;
 
         if (!initialized) {
             if (cmd == "initialize") {
@@ -366,10 +431,9 @@ int main() {
             continue;
         }
 
-        memoryBlocks.clear();
-        memoryBlocks.push_back({0, MAX_MEM - 1, -1}); 
-
         if (cmd == "scheduler-test") {
+            memoryBlocks.clear();
+            memoryBlocks.push_back({0, MAX_MEM - 1, -1});
             stopScheduler = false;
             sessions.clear();
             processNames.clear();
@@ -384,11 +448,30 @@ int main() {
             std::cout << "Started scheduling. Run 'screen -ls' every 1-2s.\n";
         }
         else if (cmd.rfind("screen -s ", 0) == 0) {
-            std::string pname = trim(cmd.substr(10));
-            if (pname.empty()) {
-                std::cout << "Usage: screen -s <process name>\n";
+            std::string pname;
+            int memorySize;
+            
+            if (!parseScreenCommand(cmd, pname, memorySize)) {
+                std::cout << "Error: Invalid command format.\n";
+                std::cout << "Usage: screen -s <process_name> [memory_size]\n";
+                std::cout << "Memory size must be a number between 64 and 65536 bytes.\n";
                 continue;
             }
+            
+            if (pname.empty()) {
+                std::cout << "Error: Process name cannot be empty.\n";
+                std::cout << "Usage: screen -s <process_name> [memory_size]\n";
+                continue;
+            }
+            
+            if (!isValidMemorySize(memorySize)) {
+                std::cout << "Error: Invalid memory size (" << memorySize << " bytes).\n";
+                std::cout << "Memory size must be:\n";
+                std::cout << "  - Between " << MIN_MEMORY_SIZE << " and " << MAX_MEMORY_SIZE << " bytes\n";
+                std::cout << "  - A power of 2 (e.g., 64, 128, 256, 512, 1024, 2048, 4096, ...)\n";
+                continue;
+            }
+            
             int pid = next_pid++;
             processNames[pid] = pname; // Store the user-supplied name
             int assignedCore = round_robin_core++ % config.num_cpu;
@@ -398,55 +481,12 @@ int main() {
                 Session s;
                 s.start = Clock::now();
                 s.finished = false;
+                s.memorySize = memorySize; // Store the specified memory size
                 sessions[pid] = s;
             }
             coreCVs[assignedCore].notify_one();
 
-            // Enter process screen
-            while (true) {
-                clearScreen();
-                std::cout << "Process name: " << processNames[pid] << "\n";
-                std::cout << "ID: " << pid << "\n";
-                std::cout << "Logs:\n";
-
-                // Print logs from file
-                std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
-                std::ifstream ifs(fname);
-                std::string logline;
-                int log_count = 0;
-                while (std::getline(ifs, logline)) {
-                    std::cout << logline << "\n";
-                    log_count++;
-                }
-                ifs.close();
-
-                // Show dummy instruction info
-                int current_line = log_count;
-                int total_lines = PRINTS_PER_PROCESS;
-                std::cout << "\nCurrent instruction line: " << current_line << "\n";
-                std::cout << "Lines of code: " << total_lines << "\n";
-
-                // If finished, print Finished!
-                if (sessions[pid].finished) {
-                    std::cout << "\nFinished!\n";
-                }
-
-                std::cout << "\nroot:\\> ";
-                std::string proc_cmd;
-                if (!std::getline(std::cin, proc_cmd)) break;
-                proc_cmd = trim(proc_cmd);
-
-                if (proc_cmd == "exit") break;
-                else if (proc_cmd == "process-smi") {
-                    continue;
-                } else {
-                    std::cout << "Unknown command: '" << proc_cmd << "'\n";
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                }
-            }
-            clearScreen();
-            printHeader();
-            continue;
+            std::cout << "Process '" << pname << "' created with " << memorySize << " bytes of memory.\n";
         }
         else if (cmd == "screen -ls") {
             std::cout << "Finished:\n";
@@ -454,14 +494,16 @@ int main() {
                 if (entry.second.finished)
                     std::cout << "  " << processNames[entry.first]
                               << " (screen_" << (entry.first < 10 ? "0" : "") << entry.first << ")"
-                              << " @ " << fmtTime(entry.second.start) << "\n";
+                              << " @ " << fmtTime(entry.second.start)
+                              << " [" << entry.second.memorySize << " bytes]\n";
             }
             std::cout << "Running:\n";
             for (const auto& entry : sessions) {
                 if (!entry.second.finished)
                     std::cout << "  " << processNames[entry.first]
                               << " (screen_" << (entry.first < 10 ? "0" : "") << entry.first << ")"
-                              << " @ " << fmtTime(entry.second.start) << "\n";
+                              << " @ " << fmtTime(entry.second.start)
+                              << " [" << entry.second.memorySize << " bytes]\n";
             }
         }
         else if (cmd == "scheduler-stop") {
@@ -506,7 +548,8 @@ int main() {
                     std::string name = processNames[pid];
                     ofs << name << "  (" << fmtTime(s.start) << ")"
                         << "   Core: " << (pid - 1) % config.num_cpu
-                        << "   " << 0 << " / ????" << "\n"; // TEMPORARY
+                        << "   " << 0 << " / ????" 
+                        << "   [" << s.memorySize << " bytes]" << "\n";
                 }
             }
 
@@ -518,7 +561,8 @@ int main() {
                     std::string name = processNames[pid];
                     ofs << name << "  (" << fmtTime(s.start) << ")"
                         << "   Finished   "
-                        << "???? / ????" << "\n"; // TEMPORARY
+                        << "???? / ????" 
+                        << "   [" << s.memorySize << " bytes]" << "\n";
                 }
             }
 
