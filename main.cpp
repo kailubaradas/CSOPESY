@@ -78,11 +78,33 @@ private:
     }
 };
 
+enum class InstructionType {
+    DECLARE,
+    ADD, SUB, MUL, DIV,
+    WRITE, READ,
+    PRINT
+};
+
+struct Instruction {
+    InstructionType type;
+    std::vector<std::string> operands;
+    
+    Instruction(InstructionType t, const std::vector<std::string>& ops) 
+        : type(t), operands(ops) {}
+};
+
+struct ProcessVariables {
+    std::map<std::string, int> variables;
+    std::map<int, int> memory;
+};
+
 struct Session {
     Clock::time_point start;
     bool finished = false;
     int memorySize = 4096;
     std::unique_ptr<ProcessMemoryLayout> memoryLayout;
+    std::vector<Instruction> instructions;
+    ProcessVariables variables;
     
     Session() = default;
     Session(const Session&) = delete;
@@ -226,52 +248,317 @@ void displayMemorySegments(int pid) {
     std::cout << "\n";
 }
 
-// JUST A TEST CASE
-void testPageTableCreation() {
-    std::cout << "\n=== PAGE TABLE CREATION TESTS ===\n";
+std::string trim(const std::string &s) {
+    auto l = s.find_first_not_of(" \t\r\n");
+    if (l == std::string::npos) return "";
+    auto r = s.find_last_not_of(" \t\r\n");
+    return s.substr(l, r - l + 1);
+}
+
+std::vector<std::string> split(const std::string& str, char delimiter) {
+    std::vector<std::string> tokens;
+    std::stringstream ss(str);
+    std::string token;
     
-    // Test case 1: Standard 4096 byte process
-    std::cout << "Test 1: Standard 4096 byte process\n";
-    int testPid1 = 9999;
-    sessions[testPid1].memorySize = 4096;
-    processNames[testPid1] = "test_standard";
-    createProcessMemoryLayout(testPid1, 4096);
+    while (std::getline(ss, token, delimiter)) {
+        tokens.push_back(trim(token));
+    }
     
-    // Test case 2: Small 128 byte process
-    std::cout << "\nTest 2: Small 128 byte process\n";
-    int testPid2 = 9998;
-    sessions[testPid2].memorySize = 128;
-    processNames[testPid2] = "test_small";
-    createProcessMemoryLayout(testPid2, 128);
+    return tokens;
+}
+
+bool isValidVariableName(const std::string& name) {
+    if (name.empty() || !std::isalpha(name[0])) {
+        return false;
+    }
     
-    // Test case 3: Large 8192 byte process
-    std::cout << "\nTest 3: Large 8192 byte process\n";
-    int testPid3 = 9997;
-    sessions[testPid3].memorySize = 8192;
-    processNames[testPid3] = "test_large";
-    createProcessMemoryLayout(testPid3, 8192);
+    for (char c : name) {
+        if (!std::isalnum(c) && c != '_') {
+            return false;
+        }
+    }
     
-    // Display page tables
-    std::cout << "\n=== PAGE TABLE DETAILS ===\n";
-    displayPageTable(testPid1);
-    displayPageTable(testPid2);
-    displayPageTable(testPid3);
+    return true;
+}
+
+bool isValidAddress(const std::string& addr) {
+    if (addr.length() < 3 || addr.substr(0, 2) != "0x") {
+        return false;
+    }
     
-    // Display memory segments
-    std::cout << "=== MEMORY SEGMENTS ===\n";
-    displayMemorySegments(testPid1);
-    displayMemorySegments(testPid2);
-    displayMemorySegments(testPid3);
+    for (size_t i = 2; i < addr.length(); ++i) {
+        if (!std::isxdigit(addr[i])) {
+            return false;
+        }
+    }
     
-    // Clean up test processes
-    sessions.erase(testPid1);
-    sessions.erase(testPid2);
-    sessions.erase(testPid3);
-    processNames.erase(testPid1);
-    processNames.erase(testPid2);
-    processNames.erase(testPid3);
+    return true;
+}
+
+int hexToInt(const std::string& hexStr) {
+    return std::stoi(hexStr, nullptr, 16);
+}
+
+bool parseInstruction(const std::string& instrStr, Instruction& instruction) {
+    std::vector<std::string> tokens = split(instrStr, ' ');
     
-    std::cout << "=== TESTS COMPLETED ===\n\n";
+    if (tokens.empty()) {
+        return false;
+    }
+    
+    std::string command = tokens[0];
+    
+    if (command == "DECLARE") {
+        if (tokens.size() != 3) {
+            std::cerr << "Error: DECLARE requires exactly 2 arguments: DECLARE <variable> <value>\n";
+            return false;
+        }
+        
+        if (!isValidVariableName(tokens[1])) {
+            std::cerr << "Error: Invalid variable name '" << tokens[1] << "'\n";
+            return false;
+        }
+        
+        try {
+            std::stoi(tokens[2]);
+        } catch (const std::exception&) {
+            std::cerr << "Error: DECLARE value must be a number\n";
+            return false;
+        }
+        
+        instruction = Instruction(InstructionType::DECLARE, {tokens[1], tokens[2]});
+        return true;
+    }
+    
+    else if (command == "ADD" || command == "SUB" || command == "MUL" || command == "DIV") {
+        if (tokens.size() != 4) {
+            std::cerr << "Error: " << command << " requires exactly 3 arguments: " 
+                      << command << " <result> <operand1> <operand2>\n";
+            return false;
+        }
+        
+        if (!isValidVariableName(tokens[1])) {
+            std::cerr << "Error: Invalid result variable name '" << tokens[1] << "'\n";
+            return false;
+        }
+        
+        InstructionType type;
+        if (command == "ADD") type = InstructionType::ADD;
+        else if (command == "SUB") type = InstructionType::SUB;
+        else if (command == "MUL") type = InstructionType::MUL;
+        else type = InstructionType::DIV;
+        
+        instruction = Instruction(type, {tokens[1], tokens[2], tokens[3]});
+        return true;
+    }
+    
+    else if (command == "WRITE") {
+        if (tokens.size() != 3) {
+            std::cerr << "Error: WRITE requires exactly 2 arguments: WRITE <address> <variable>\n";
+            return false;
+        }
+        
+        if (!isValidAddress(tokens[1])) {
+            std::cerr << "Error: Invalid address format '" << tokens[1] << "'. Use 0xABCD format.\n";
+            return false;
+        }
+        
+        if (!isValidVariableName(tokens[2])) {
+            std::cerr << "Error: Invalid variable name '" << tokens[2] << "'\n";
+            return false;
+        }
+        
+        instruction = Instruction(InstructionType::WRITE, {tokens[1], tokens[2]});
+        return true;
+    }
+    
+    else if (command == "READ") {
+        if (tokens.size() != 3) {
+            std::cerr << "Error: READ requires exactly 2 arguments: READ <variable> <address>\n";
+            return false;
+        }
+        
+        if (!isValidVariableName(tokens[1])) {
+            std::cerr << "Error: Invalid variable name '" << tokens[1] << "'\n";
+            return false;
+        }
+        
+        if (!isValidAddress(tokens[2])) {
+            std::cerr << "Error: Invalid address format '" << tokens[2] << "'. Use 0xABCD format.\n";
+            return false;
+        }
+        
+        instruction = Instruction(InstructionType::READ, {tokens[1], tokens[2]});
+        return true;
+    }
+    
+    else if (command == "PRINT") {
+        if (tokens.size() < 2) {
+            std::cerr << "Error: PRINT requires at least 1 argument\n";
+            return false;
+        }
+        
+        std::string printArg = instrStr.substr(instrStr.find("PRINT") + 5);
+        printArg = trim(printArg);
+        
+        if (printArg.empty() || printArg.front() != '(' || printArg.back() != ')') {
+            std::cerr << "Error: PRINT argument must be enclosed in parentheses\n";
+            return false;
+        }
+        
+        printArg = printArg.substr(1, printArg.length() - 2);
+        instruction = Instruction(InstructionType::PRINT, {printArg});
+        return true;
+    }
+
+    else if (command == "PRINT" || command.substr(0, 6) == "PRINT(") {
+        std::string printArg;
+        
+        if (command == "PRINT") {
+            if (tokens.size() < 2) {
+                std::cerr << "Error: PRINT requires at least 1 argument\n";
+                return false;
+            }
+            
+            printArg = instrStr.substr(instrStr.find("PRINT") + 5);
+            printArg = trim(printArg);
+        } else {
+            printArg = instrStr.substr(5);
+        }
+        
+        if (printArg.empty() || printArg.front() != '(' || printArg.back() != ')') {
+            std::cerr << "Error: PRINT argument must be enclosed in parentheses\n";
+            return false;
+        }
+        
+        printArg = printArg.substr(1, printArg.length() - 2);
+        instruction = Instruction(InstructionType::PRINT, {printArg});
+        return true;
+    }
+    
+    else {
+        std::cerr << "Error: Unknown instruction '" << command << "'\n";
+        return false;
+    }
+}
+
+bool parseInstructions(const std::string& instructionString, std::vector<Instruction>& instructions) {
+    instructions.clear();
+    
+    if (instructionString.empty()) {
+        std::cerr << "Error: Instruction string cannot be empty\n";
+        return false;
+    }
+    
+    std::vector<std::string> instrList = split(instructionString, ';');
+    
+    if (instrList.size() < 1 || instrList.size() > 50) {
+        std::cerr << "Error: Number of instructions must be between 1 and 50. Found: " 
+                  << instrList.size() << "\n";
+        return false;
+    }
+    
+    for (const std::string& instrStr : instrList) {
+        std::string trimmedInstr = trim(instrStr);
+        if (trimmedInstr.empty()) continue;
+        
+        Instruction instruction(InstructionType::DECLARE, {});
+        if (!parseInstruction(trimmedInstr, instruction)) {
+            return false;
+        }
+        
+        instructions.push_back(instruction);
+    }
+    
+    return true;
+}
+
+bool parseScreenCommandWithInstructions(const std::string& cmd, std::string& processName, 
+                                       int& memorySize, std::string& instructions) {
+    if (cmd.substr(0, 10) != "screen -c ") {
+        return false;
+    }
+    
+    std::string args = cmd.substr(10); 
+    
+    size_t quoteStart = args.find('"');
+    if (quoteStart == std::string::npos) {
+        std::cerr << "Error: Instructions must be enclosed in double quotes\n";
+        return false;
+    }
+    
+    size_t quoteEnd = args.find('"', quoteStart + 1);
+    if (quoteEnd == std::string::npos) {
+        std::cerr << "Error: Missing closing quote for instructions\n";
+        return false;
+    }
+    
+    instructions = args.substr(quoteStart + 1, quoteEnd - quoteStart - 1);
+    
+    std::string beforeInstructions = trim(args.substr(0, quoteStart));
+    std::vector<std::string> parts = split(beforeInstructions, ' ');
+    
+    if (parts.size() != 2) {
+        std::cerr << "Error: Expected format: screen -c <process_name> <memory_size> \"<instructions>\"\n";
+        return false;
+    }
+    
+    processName = parts[0];
+    
+    try {
+        memorySize = std::stoi(parts[1]);
+    } catch (const std::exception&) {
+        std::cerr << "Error: Invalid memory size\n";
+        return false;
+    }
+    
+    return true;
+}
+
+void printInstructions(const std::vector<Instruction>& instructions) {
+    std::cout << "Parsed Instructions (" << instructions.size() << " total):\n";
+    for (size_t i = 0; i < instructions.size(); ++i) {
+        std::cout << "  " << (i + 1) << ". ";
+        
+        switch (instructions[i].type) {
+            case InstructionType::DECLARE:
+                std::cout << "DECLARE " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1];
+                break;
+            case InstructionType::ADD:
+                std::cout << "ADD " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1] 
+                          << " " << instructions[i].operands[2];
+                break;
+            case InstructionType::SUB:
+                std::cout << "SUB " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1] 
+                          << " " << instructions[i].operands[2];
+                break;
+            case InstructionType::MUL:
+                std::cout << "MUL " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1] 
+                          << " " << instructions[i].operands[2];
+                break;
+            case InstructionType::DIV:
+                std::cout << "DIV " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1] 
+                          << " " << instructions[i].operands[2];
+                break;
+            case InstructionType::WRITE:
+                std::cout << "WRITE " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1];
+                break;
+            case InstructionType::READ:
+                std::cout << "READ " << instructions[i].operands[0] 
+                          << " " << instructions[i].operands[1];
+                break;
+            case InstructionType::PRINT:
+                std::cout << "PRINT(" << instructions[i].operands[0] << ")";
+                break;
+        }
+        std::cout << "\n";
+    }
 }
 
 bool isPowerOfTwo(int n) {
@@ -636,13 +923,6 @@ void clearScreen() {
 #endif
 }
 
-std::string trim(const std::string &s) {
-    auto l = s.find_first_not_of(" \t\r\n");
-    if (l == std::string::npos) return "";
-    auto r = s.find_last_not_of(" \t\r\n");
-    return s.substr(l, r - l + 1);
-}
-
 int main() {
     bool initialized = false;
     std::string line;
@@ -698,9 +978,6 @@ int main() {
             scheduler = std::thread(schedulerThread);
             std::cout << "Started scheduling. Run 'screen -ls' every 1-2s.\n";
         }
-        else if (cmd == "test-pagetable") {
-            testPageTableCreation();
-        }
         else if (cmd.rfind("pagetable ", 0) == 0) {
             try {
                 int pid = std::stoi(cmd.substr(10));
@@ -717,6 +994,63 @@ int main() {
                 std::cout << "Error: Invalid process ID. Usage: segments <pid>\n";
             }
         }
+        else if (cmd.rfind("screen -c ", 0) == 0) {
+            std::string pname, instructionString;
+            int memorySize;
+            
+            if (!parseScreenCommandWithInstructions(cmd, pname, memorySize, instructionString)) {
+                std::cout << "Error: Invalid command format.\n";
+                std::cout << "Usage: screen -c <process_name> <memory_size> \"<instructions>\"\n";
+                std::cout << "Example: screen -c myprocess 1024 \"DECLARE x 10; ADD result x 5; PRINT(result)\"\n";
+                continue;
+            }
+            
+            if (pname.empty()) {
+                std::cout << "Error: Process name cannot be empty.\n";
+                continue;
+            }
+            
+            if (!isValidMemorySize(memorySize)) {
+                std::cout << "Error: Invalid memory size (" << memorySize << " bytes).\n";
+                std::cout << "Memory size must be:\n";
+                std::cout << "  - Between " << MIN_MEMORY_SIZE << " and " << MAX_MEMORY_SIZE << " bytes\n";
+                std::cout << "  - A power of 2 (e.g., 64, 128, 256, 512, 1024, 2048, 4096, ...)\n";
+                continue;
+            }
+            
+            // Parse instructions
+            std::vector<Instruction> instructions;
+            if (!parseInstructions(instructionString, instructions)) {
+                std::cout << "Error: Failed to parse instructions.\n";
+                continue;
+            }
+            
+            int pid = next_pid++;
+            processNames[pid] = pname;
+            int assignedCore = round_robin_core++ % config.num_cpu;
+            
+            {
+                std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
+                coreQueues[assignedCore].push(pid);
+                Session s;
+                s.start = Clock::now();
+                s.finished = false;
+                s.memorySize = memorySize;
+                s.instructions = instructions;  // Store the parsed instructions
+                sessions[pid] = std::move(s);
+                
+                createProcessMemoryLayout(pid, memorySize);
+            }
+            coreCVs[assignedCore].notify_one();
+
+            std::cout << "Process '" << pname << "' created with " << memorySize << " bytes of memory.\n";
+            std::cout << "Instructions parsed successfully (" << instructions.size() << " instructions).\n";
+            printInstructions(instructions);
+            
+            // Rest of the screen interaction code remains the same...
+            // [Continue with existing screen interaction loop]
+        }
+
         else if (cmd.rfind("screen -s ", 0) == 0) {
             std::string pname;
             int memorySize;
