@@ -16,10 +16,92 @@
 
 using Clock = std::chrono::system_clock;
 
+// **CONSTANTS MOVED TO TOP**
+const int NUM_PROCESSES = 10;
+const int PRINTS_PER_PROCESS = 100;
+const int MAX_MEM = 16384;
+const int MEM_PER_PROC = 4096;
+const int MEM_PER_FRAME = 16;
+
+// Memory size validation constants
+const int MIN_MEMORY_SIZE = 64;
+const int MAX_MEMORY_SIZE = 65536;
+
+// **NEW STRUCTURES FOR PAGE TABLE AND SEGMENTATION**
+
+struct PageEntry {
+    int physicalFrame;      // Physical frame number (-1 if not loaded)
+    bool isLoaded;          // Whether page is currently in physical memory
+    bool isDirty;           // Whether page has been modified
+    bool isAccessed;        // Whether page has been accessed recently
+    
+    PageEntry() : physicalFrame(-1), isLoaded(false), isDirty(false), isAccessed(false) {}
+};
+
+struct PageTable {
+    std::vector<PageEntry> pages;
+    int numPages;
+    
+    PageTable(int pages_needed) : numPages(pages_needed) {
+        pages.resize(pages_needed);
+    }
+};
+
+struct MemorySegment {
+    int startAddress;       // Virtual start address
+    int size;               // Size in bytes
+    std::string type;       // "symbol_table", "code", "stack", "heap"
+    
+    MemorySegment(int start, int sz, const std::string& t) 
+        : startAddress(start), size(sz), type(t) {}
+};
+
+struct ProcessMemoryLayout {
+    std::vector<MemorySegment> segments;
+    PageTable pageTable;
+    int totalMemorySize;
+    
+    ProcessMemoryLayout(int memSize) : pageTable(0), totalMemorySize(memSize) {
+        // Calculate number of pages needed
+        int pagesNeeded = (memSize + MEM_PER_FRAME - 1) / MEM_PER_FRAME; // Ceiling division
+        pageTable = PageTable(pagesNeeded);
+        
+        // Initialize segments
+        initializeSegments();
+    }
+    
+private:
+    void initializeSegments() {
+        // First 64 bytes: Symbol table for declared variables
+        segments.emplace_back(0, 64, "symbol_table");
+        
+        // Remaining memory divided into segments
+        int remainingMemory = totalMemorySize - 64;
+        if (remainingMemory > 0) {
+            // Divide remaining memory: 40% code, 30% stack, 30% heap
+            int codeSize = (remainingMemory * 40) / 100;
+            int stackSize = (remainingMemory * 30) / 100;
+            int heapSize = remainingMemory - codeSize - stackSize; // Remainder goes to heap
+            
+            segments.emplace_back(64, codeSize, "code");
+            segments.emplace_back(64 + codeSize, stackSize, "stack");
+            segments.emplace_back(64 + codeSize + stackSize, heapSize, "heap");
+        }
+    }
+};
+
+// **ENHANCED SESSION STRUCTURE**
 struct Session {
     Clock::time_point start;
     bool finished = false;
     int memorySize = 4096; // Default memory size in bytes
+    std::unique_ptr<ProcessMemoryLayout> memoryLayout; // NEW: Memory layout with page table
+    
+    Session() = default;
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    Session(Session&&) = default;
+    Session& operator=(Session&&) = default;
 };
 
 struct Config {
@@ -71,16 +153,6 @@ void printConfig(const Config& config) {
     std::cout << "  delays-per-exec: " << config.delays_per_exec << "\n";
 }
 
-const int NUM_PROCESSES = 10;
-const int PRINTS_PER_PROCESS = 100;
-const int MAX_MEM = 16384;
-const int MEM_PER_PROC = 4096;
-const int MEM_PER_FRAME = 16;
-
-// Memory size validation constants
-const int MIN_MEMORY_SIZE = 64;
-const int MAX_MEMORY_SIZE = 65536;
-
 std::map<int, Session> sessions;
 std::map<int, std::string> processNames;
 std::atomic<bool> stopScheduler(false);
@@ -98,6 +170,126 @@ struct MemoryBlock {
 std::vector<MemoryBlock> memoryBlocks;  
 std::mutex memoryMutex;
 int snapshotCounter = 0;
+
+// **NEW FUNCTIONS FOR PAGE TABLE MANAGEMENT**
+
+// Helper function to create process memory layout
+void createProcessMemoryLayout(int pid, int memorySize) {
+    sessions[pid].memoryLayout = std::make_unique<ProcessMemoryLayout>(memorySize);
+    
+    std::cout << "Created memory layout for process " << pid << ":\n";
+    std::cout << "  Total memory: " << memorySize << " bytes\n";
+    std::cout << "  Pages needed: " << sessions[pid].memoryLayout->pageTable.numPages << "\n";
+    std::cout << "  Memory segments:\n";
+    
+    for (const auto& segment : sessions[pid].memoryLayout->segments) {
+        std::cout << "    " << segment.type << ": " 
+                  << segment.startAddress << "-" 
+                  << (segment.startAddress + segment.size - 1) 
+                  << " (" << segment.size << " bytes)\n";
+    }
+}
+
+// Function to display page table information
+void displayPageTable(int pid) {
+    if (sessions.find(pid) == sessions.end() || !sessions[pid].memoryLayout) {
+        std::cout << "Process " << pid << " not found or has no memory layout.\n";
+        return;
+    }
+    
+    const auto& pageTable = sessions[pid].memoryLayout->pageTable;
+    std::cout << "Page Table for Process " << pid << " (" << processNames[pid] << "):\n";
+    std::cout << "Total Pages: " << pageTable.numPages << "\n";
+    std::cout << "Page Size: " << MEM_PER_FRAME << " bytes\n\n";
+    
+    std::cout << "Page# | Physical Frame | Loaded | Dirty | Accessed\n";
+    std::cout << "------|----------------|--------|-------|----------\n";
+    
+    for (int i = 0; i < pageTable.numPages; ++i) {
+        const auto& page = pageTable.pages[i];
+        std::cout << std::setw(5) << i << " | ";
+        
+        if (page.physicalFrame == -1) {
+            std::cout << std::setw(14) << "N/A" << " | ";
+        } else {
+            std::cout << std::setw(14) << page.physicalFrame << " | ";
+        }
+        
+        std::cout << std::setw(6) << (page.isLoaded ? "Yes" : "No") << " | ";
+        std::cout << std::setw(5) << (page.isDirty ? "Yes" : "No") << " | ";
+        std::cout << std::setw(8) << (page.isAccessed ? "Yes" : "No") << "\n";
+    }
+    std::cout << "\n";
+}
+
+// Function to display memory segments
+void displayMemorySegments(int pid) {
+    if (sessions.find(pid) == sessions.end() || !sessions[pid].memoryLayout) {
+        std::cout << "Process " << pid << " not found or has no memory layout.\n";
+        return;
+    }
+    
+    const auto& segments = sessions[pid].memoryLayout->segments;
+    std::cout << "Memory Segments for Process " << pid << " (" << processNames[pid] << "):\n";
+    std::cout << "Segment Type  | Start Address | End Address | Size (bytes)\n";
+    std::cout << "--------------|---------------|-------------|-------------\n";
+    
+    for (const auto& segment : segments) {
+        std::cout << std::setw(12) << segment.type << " | ";
+        std::cout << std::setw(13) << segment.startAddress << " | ";
+        std::cout << std::setw(11) << (segment.startAddress + segment.size - 1) << " | ";
+        std::cout << std::setw(11) << segment.size << "\n";
+    }
+    std::cout << "\n";
+}
+
+// Test function to validate page table creation
+void testPageTableCreation() {
+    std::cout << "\n=== PAGE TABLE CREATION TESTS ===\n";
+    
+    // Test case 1: Standard 4096 byte process
+    std::cout << "Test 1: Standard 4096 byte process\n";
+    int testPid1 = 9999;
+    sessions[testPid1].memorySize = 4096;
+    processNames[testPid1] = "test_standard";
+    createProcessMemoryLayout(testPid1, 4096);
+    
+    // Test case 2: Small 128 byte process
+    std::cout << "\nTest 2: Small 128 byte process\n";
+    int testPid2 = 9998;
+    sessions[testPid2].memorySize = 128;
+    processNames[testPid2] = "test_small";
+    createProcessMemoryLayout(testPid2, 128);
+    
+    // Test case 3: Large 8192 byte process
+    std::cout << "\nTest 3: Large 8192 byte process\n";
+    int testPid3 = 9997;
+    sessions[testPid3].memorySize = 8192;
+    processNames[testPid3] = "test_large";
+    createProcessMemoryLayout(testPid3, 8192);
+    
+    // Display page tables
+    std::cout << "\n=== PAGE TABLE DETAILS ===\n";
+    displayPageTable(testPid1);
+    displayPageTable(testPid2);
+    displayPageTable(testPid3);
+    
+    // Display memory segments
+    std::cout << "=== MEMORY SEGMENTS ===\n";
+    displayMemorySegments(testPid1);
+    displayMemorySegments(testPid2);
+    displayMemorySegments(testPid3);
+    
+    // Clean up test processes
+    sessions.erase(testPid1);
+    sessions.erase(testPid2);
+    sessions.erase(testPid3);
+    processNames.erase(testPid1);
+    processNames.erase(testPid2);
+    processNames.erase(testPid3);
+    
+    std::cout << "=== TESTS COMPLETED ===\n\n";
+}
 
 // Helper function to check if a number is a power of 2
 bool isPowerOfTwo(int n) {
@@ -285,8 +477,11 @@ void schedulerThread() {
             s.start = Clock::now();
             s.finished = false;
             s.memorySize = MEM_PER_PROC; // Default for scheduler-test
-            sessions[pid] = s;
+            sessions[pid] = std::move(s);
             processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
+            
+            // **NEW: Create memory layout for each process**
+            createProcessMemoryLayout(pid, MEM_PER_PROC);
         }
 
         int currentCore = 0;
@@ -344,8 +539,11 @@ void schedulerThread() {
                 s.start = Clock::now();
                 s.finished = false;
                 s.memorySize = MEM_PER_PROC; // Default for scheduler-test
-                sessions[pid] = s;
+                sessions[pid] = std::move(s);
                 processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
+                
+                // **NEW: Create memory layout for each process**
+                createProcessMemoryLayout(pid, MEM_PER_PROC);
             }
             coreCVs[assignedCore].notify_one();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -396,10 +594,6 @@ int main() {
 
     clearScreen(); printHeader();
 
-    // Initialize memory blocks once when the system starts
-    memoryBlocks.clear();
-    memoryBlocks.push_back({0, MAX_MEM - 1, -1});
-
     while (true) {
         std::cout << "Main> ";
         if (!std::getline(std::cin, line)) break;
@@ -407,9 +601,6 @@ int main() {
         if (cmd.empty()) continue;
 
         if (cmd == "exit") break;
-
-        // Debug output to see what command is being processed
-        // std::cout << "Processing command: '" << cmd << "'" << std::endl;
 
         if (!initialized) {
             if (cmd == "initialize") {
@@ -431,9 +622,10 @@ int main() {
             continue;
         }
 
+        memoryBlocks.clear();
+        memoryBlocks.push_back({0, MAX_MEM - 1, -1}); 
+
         if (cmd == "scheduler-test") {
-            memoryBlocks.clear();
-            memoryBlocks.push_back({0, MAX_MEM - 1, -1});
             stopScheduler = false;
             sessions.clear();
             processNames.clear();
@@ -446,6 +638,28 @@ int main() {
                 workers.emplace_back(cpuWorker, i);
             scheduler = std::thread(schedulerThread);
             std::cout << "Started scheduling. Run 'screen -ls' every 1-2s.\n";
+        }
+        // **NEW COMMAND: Test page table creation**
+        else if (cmd == "test-pagetable") {
+            testPageTableCreation();
+        }
+        // **NEW COMMAND: Display page table for a specific process**
+        else if (cmd.rfind("pagetable ", 0) == 0) {
+            try {
+                int pid = std::stoi(cmd.substr(10));
+                displayPageTable(pid);
+            } catch (const std::exception& e) {
+                std::cout << "Error: Invalid process ID. Usage: pagetable <pid>\n";
+            }
+        }
+        // **NEW COMMAND: Display memory segments for a specific process**
+        else if (cmd.rfind("segments ", 0) == 0) {
+            try {
+                int pid = std::stoi(cmd.substr(9));
+                displayMemorySegments(pid);
+            } catch (const std::exception& e) {
+                std::cout << "Error: Invalid process ID. Usage: segments <pid>\n";
+            }
         }
         else if (cmd.rfind("screen -s ", 0) == 0) {
             std::string pname;
@@ -482,28 +696,101 @@ int main() {
                 s.start = Clock::now();
                 s.finished = false;
                 s.memorySize = memorySize; // Store the specified memory size
-                sessions[pid] = s;
+                sessions[pid] = std::move(s);
+                
+                // **NEW: Create memory layout for the process**
+                createProcessMemoryLayout(pid, memorySize);
             }
             coreCVs[assignedCore].notify_one();
 
             std::cout << "Process '" << pname << "' created with " << memorySize << " bytes of memory.\n";
+
+            // Enter process screen
+            while (true) {
+                clearScreen();
+                std::cout << "Process name: " << processNames[pid] << "\n";
+                std::cout << "ID: " << pid << "\n";
+                std::cout << "Memory size: " << sessions[pid].memorySize << " bytes\n";
+                
+                // **NEW: Display page table info**
+                if (sessions[pid].memoryLayout) {
+                    std::cout << "Pages needed: " << sessions[pid].memoryLayout->pageTable.numPages << "\n";
+                }
+                
+                std::cout << "Logs:\n";
+
+                // Print logs from file
+                std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
+                std::ifstream ifs(fname);
+                std::string logline;
+                int log_count = 0;
+                while (std::getline(ifs, logline)) {
+                    std::cout << logline << "\n";
+                    log_count++;
+                }
+                ifs.close();
+
+                // Show dummy instruction info
+                int current_line = log_count;
+                int total_lines = PRINTS_PER_PROCESS;
+                std::cout << "\nCurrent instruction line: " << current_line << "\n";
+                std::cout << "Lines of code: " << total_lines << "\n";
+
+                // If finished, print Finished!
+                if (sessions[pid].finished) {
+                    std::cout << "\nFinished!\n";
+                }
+
+                std::cout << "\nroot:\\> ";
+                std::string proc_cmd;
+                if (!std::getline(std::cin, proc_cmd)) break;
+                proc_cmd = trim(proc_cmd);
+
+                if (proc_cmd == "exit") break;
+                else if (proc_cmd == "process-smi") {
+                    continue;
+                }
+                // **NEW COMMAND: Show page table within process screen**
+                else if (proc_cmd == "pagetable") {
+                    displayPageTable(pid);
+                    std::cout << "Press Enter to continue...";
+                    std::cin.get();
+                }
+                // **NEW COMMAND: Show memory segments within process screen**
+                else if (proc_cmd == "segments") {
+                    displayMemorySegments(pid);
+                    std::cout << "Press Enter to continue...";
+                    std::cin.get();
+                } else {
+                    std::cout << "Unknown command: '" << proc_cmd << "'\n";
+                    std::cout << "Available commands: exit, process-smi, pagetable, segments\n";
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                }
+            }
+            clearScreen();
+            printHeader();
+            continue;
         }
         else if (cmd == "screen -ls") {
             std::cout << "Finished:\n";
             for (const auto& entry : sessions) {
-                if (entry.second.finished)
+                if (entry.second.finished) {
+                    int pages = entry.second.memoryLayout ? entry.second.memoryLayout->pageTable.numPages : 0;
                     std::cout << "  " << processNames[entry.first]
                               << " (screen_" << (entry.first < 10 ? "0" : "") << entry.first << ")"
                               << " @ " << fmtTime(entry.second.start)
-                              << " [" << entry.second.memorySize << " bytes]\n";
+                              << " [" << entry.second.memorySize << " bytes, " << pages << " pages]\n";
+                }
             }
             std::cout << "Running:\n";
             for (const auto& entry : sessions) {
-                if (!entry.second.finished)
+                if (!entry.second.finished) {
+                    int pages = entry.second.memoryLayout ? entry.second.memoryLayout->pageTable.numPages : 0;
                     std::cout << "  " << processNames[entry.first]
                               << " (screen_" << (entry.first < 10 ? "0" : "") << entry.first << ")"
                               << " @ " << fmtTime(entry.second.start)
-                              << " [" << entry.second.memorySize << " bytes]\n";
+                              << " [" << entry.second.memorySize << " bytes, " << pages << " pages]\n";
+                }
             }
         }
         else if (cmd == "scheduler-stop") {
@@ -546,10 +833,11 @@ int main() {
                     int pid = entry.first;
                     const Session& s = entry.second;
                     std::string name = processNames[pid];
+                    int pages = s.memoryLayout ? s.memoryLayout->pageTable.numPages : 0;
                     ofs << name << "  (" << fmtTime(s.start) << ")"
                         << "   Core: " << (pid - 1) % config.num_cpu
                         << "   " << 0 << " / ????" 
-                        << "   [" << s.memorySize << " bytes]" << "\n";
+                        << "   [" << s.memorySize << " bytes, " << pages << " pages]" << "\n";
                 }
             }
 
@@ -559,18 +847,35 @@ int main() {
                     int pid = entry.first;
                     const Session& s = entry.second;
                     std::string name = processNames[pid];
+                    int pages = s.memoryLayout ? s.memoryLayout->pageTable.numPages : 0;
                     ofs << name << "  (" << fmtTime(s.start) << ")"
                         << "   Finished   "
                         << "???? / ????" 
-                        << "   [" << s.memorySize << " bytes]" << "\n";
+                        << "   [" << s.memorySize << " bytes, " << pages << " pages]" << "\n";
                 }
             }
 
             ofs << "------------------------------------------\n";
             ofs.close();
             std::cout << "Report generated at C:/csopesy-log.txt!\n";
-        } else {
-            std::cout << "Unknown cmd: '" << cmd << "'\n";
+        } 
+        // **NEW COMMAND: Help command to show available commands**
+        else if (cmd == "help") {
+            std::cout << "\nAvailable Commands:\n";
+            std::cout << "  initialize                    - Initialize the system\n";
+            std::cout << "  scheduler-test               - Start the scheduler test\n";
+            std::cout << "  scheduler-stop               - Stop the scheduler\n";
+            std::cout << "  screen -s <name> [mem_size]  - Create a new process\n";
+            std::cout << "  screen -ls                   - List all processes\n";
+            std::cout << "  pagetable <pid>              - Show page table for process\n";
+            std::cout << "  segments <pid>               - Show memory segments for process\n";
+            std::cout << "  test-pagetable               - Run page table creation tests\n";
+            std::cout << "  report-util                  - Generate utilization report\n";
+            std::cout << "  help                         - Show this help message\n";
+            std::cout << "  exit                         - Exit the program\n\n";
+        }
+        else {
+            std::cout << "Unknown cmd: '" << cmd << "'. Type 'help' for available commands.\n";
         }
     }
     
