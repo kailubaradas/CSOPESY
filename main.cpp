@@ -16,15 +16,6 @@
 
 using Clock = std::chrono::system_clock;
 
-const int NUM_PROCESSES = 10;
-const int PRINTS_PER_PROCESS = 100;
-const int MAX_MEM = 16384;
-const int MEM_PER_PROC = 4096;
-const int MEM_PER_FRAME = 16;
-
-const int MIN_MEMORY_SIZE = 64;
-const int MAX_MEMORY_SIZE = 65536;
-
 struct PageEntry {
     int physicalFrame;
     bool isLoaded;
@@ -58,7 +49,7 @@ struct ProcessMemoryLayout {
     int totalMemorySize;
     
     ProcessMemoryLayout(int memSize) : pageTable(0), totalMemorySize(memSize) {
-        int pagesNeeded = (memSize + MEM_PER_FRAME - 1) / MEM_PER_FRAME; 
+        int pagesNeeded = (memSize + config.mem_per_frame - 1) / config.mem_per_frame; 
         pageTable = PageTable(pagesNeeded);
         initializeSegments();
     }
@@ -121,8 +112,16 @@ struct Config {
     int min_ins;
     int max_ins;
     int delays_per_exec;
+    int num_processes = 10;
+    int prints_per_process = 100;
+    int max_overall_mem;
+    int mem_per_frame;
+    int mem_per_proc = 4096;
+    int min_memory_size = 64;
+    int max_memory_size = 65536;
+    int num_frames = 1024;
+    int backing_store_size = 65536;
 };
-
 Config config;
 
 bool readConfig(const std::string& filename, Config& config) {
@@ -131,7 +130,6 @@ bool readConfig(const std::string& filename, Config& config) {
         std::cerr << "Error: Cannot open config file '" << filename << "'\n";
         return false;
     }
-
     std::string key;
     while (file >> key) {
         if (key == "num-cpu") file >> config.num_cpu;
@@ -141,13 +139,22 @@ bool readConfig(const std::string& filename, Config& config) {
         else if (key == "min-ins") file >> config.min_ins;
         else if (key == "max-ins") file >> config.max_ins;
         else if (key == "delays-per-exec") file >> config.delays_per_exec;
+        else if (key == "num-processes") file >> config.num_processes;
+        else if (key == "prints-per-process") file >> config.prints_per_process;
+        else if (key == "max-overall-mem") file >> config.max_memory_size;
+        else if (key == "mem-per-frame") file >> config.mem_per_frame;
+        else if (key == "mem-per-proc") file >> config.mem_per_proc;
+        else if (key == "min-memory-size") file >> config.min_memory_size;
+        else if (key == "max-memory-size") file >> config.max_memory_size;
+        else if (key == "num-frames") file >> config.num_frames;
+        else if (key == "backing-store-size") file >> config.backing_store_size;
         else {
             std::string garbage;
             file >> garbage;
             std::cerr << "Warning: Unknown config key '" << key << "'. Skipping.\n";
         }
     }
-
+    config.num_frames = config.max_memory_size / config.mem_per_frame;
     return true;
 }
 
@@ -181,6 +188,435 @@ std::mutex memoryMutex;
 int snapshotCounter = 0;
 bool enableSnapshots = false;
 
+// ===== DEMAND PAGING ALLOCATOR IMPLEMENTATION =====
+
+// Physical Frame Management
+struct PhysicalFrame {
+    int frameNumber;
+    int processId;
+    int pageNumber;
+    bool isOccupied;
+    bool isDirty;
+    Clock::time_point lastAccessed;
+    
+    PhysicalFrame() : frameNumber(-1), processId(-1), pageNumber(-1), 
+                     isOccupied(false), isDirty(false), lastAccessed(Clock::now()) {}
+    
+    PhysicalFrame(int frameNum) : frameNumber(frameNum), processId(-1), pageNumber(-1), 
+                                 isOccupied(false), isDirty(false), lastAccessed(Clock::now()) {}
+};
+
+// Backing Store Simulation
+struct BackingStore {
+    std::vector<std::vector<int>> processPages;  // [processId][pageNumber] -> data
+    std::mutex backingStoreMutex;
+    
+    BackingStore() {
+        processPages.resize(1000);  // Support up to 1000 processes
+        for (auto& pages : processPages) {
+            pages.resize(1000, 0);  // Each process can have up to 1000 pages
+        }
+    }
+    
+    void storePage(int processId, int pageNumber, const std::vector<int>& pageData) {
+        std::lock_guard<std::mutex> lock(backingStoreMutex);
+        if (processId < processPages.size() && pageNumber < processPages[processId].size()) {
+            // Simulate storing page data (simplified as single integer)
+            processPages[processId][pageNumber] = pageData.empty() ? 0 : pageData[0];
+        }
+    }
+    
+    std::vector<int> loadPage(int processId, int pageNumber) {
+        std::lock_guard<std::mutex> lock(backingStoreMutex);
+        std::vector<int> pageData(config.mem_per_frame / sizeof(int), 0);
+        if (processId < processPages.size() && pageNumber < processPages[processId].size()) {
+            pageData[0] = processPages[processId][pageNumber];
+        }
+        return pageData;
+    }
+};
+
+// Global Memory Management
+class DemandPagingAllocator {
+private:
+    std::vector<PhysicalFrame> physicalFrames;
+    std::queue<int> freeFrames;
+    BackingStore backingStore;
+    std::mutex framesMutex;
+    int pageFaultCount;
+    int pageReplacementCount;
+    
+    // LRU Page Replacement Algorithm
+    int findLRUFrame() {
+        int lruFrame = -1;
+        Clock::time_point oldestTime = Clock::now();
+        
+        for (int i = 0; i < config.num_frames; ++i) {
+            if (physicalFrames[i].isOccupied && physicalFrames[i].lastAccessed < oldestTime) {
+                oldestTime = physicalFrames[i].lastAccessed;
+                lruFrame = i;
+            }
+        }
+        return lruFrame;
+    }
+    
+    void evictPage(int frameNumber) {
+        PhysicalFrame& frame = physicalFrames[frameNumber];
+        
+        if (frame.isDirty) {
+            // Write page back to backing store
+            std::vector<int> pageData(config.mem_per_frame / sizeof(int), frameNumber); // Simplified data
+            backingStore.storePage(frame.processId, frame.pageNumber, pageData);
+        }
+        
+        // Update the page table entry for the evicted page
+        if (sessions.find(frame.processId) != sessions.end() && 
+            sessions[frame.processId].memoryLayout) {
+            auto& pageTable = sessions[frame.processId].memoryLayout->pageTable;
+            if (frame.pageNumber < pageTable.numPages) {
+                pageTable.pages[frame.pageNumber].isLoaded = false;
+                pageTable.pages[frame.pageNumber].physicalFrame = -1;
+                pageTable.pages[frame.pageNumber].isDirty = frame.isDirty;
+            }
+        }
+        
+        // Clear frame
+        frame.processId = -1;
+        frame.pageNumber = -1;
+        frame.isOccupied = false;
+        frame.isDirty = false;
+        
+        pageReplacementCount++;
+    }
+    
+public:
+    DemandPagingAllocator() : pageFaultCount(0), pageReplacementCount(0) {
+        physicalFrames.resize(config.num_frames);
+        for (int i = 0; i < config.num_frames; ++i) {
+            physicalFrames[i] = PhysicalFrame(i);
+            freeFrames.push(i);
+        }
+    }
+    
+    // Handle page fault - load page into physical memory
+    bool handlePageFault(int processId, int pageNumber) {
+        std::lock_guard<std::mutex> lock(framesMutex);
+        
+        pageFaultCount++;
+        
+        // Check if process exists
+        if (sessions.find(processId) == sessions.end() || 
+            !sessions[processId].memoryLayout) {
+            return false;
+        }
+        
+        auto& pageTable = sessions[processId].memoryLayout->pageTable;
+        if (pageNumber >= pageTable.numPages) {
+            return false;
+        }
+        
+        int frameNumber = -1;
+        
+        // Try to get a free frame
+        if (!freeFrames.empty()) {
+            frameNumber = freeFrames.front();
+            freeFrames.pop();
+        } else {
+            // No free frames, use LRU replacement
+            frameNumber = findLRUFrame();
+            if (frameNumber != -1) {
+                evictPage(frameNumber);
+            } else {
+                return false; // No frame available
+            }
+        }
+        
+        // Load page from backing store
+        std::vector<int> pageData = backingStore.loadPage(processId, pageNumber);
+        
+        // Update physical frame
+        PhysicalFrame& frame = physicalFrames[frameNumber];
+        frame.processId = processId;
+        frame.pageNumber = pageNumber;
+        frame.isOccupied = true;
+        frame.isDirty = false;
+        frame.lastAccessed = Clock::now();
+        
+        // Update page table entry
+        PageEntry& pageEntry = pageTable.pages[pageNumber];
+        pageEntry.physicalFrame = frameNumber;
+        pageEntry.isLoaded = true;
+        pageEntry.isAccessed = true;
+        pageEntry.isDirty = false;
+        
+        return true;
+    }
+    
+    // Access memory address (triggers page fault if needed)
+    bool accessMemory(int processId, int virtualAddress, bool isWrite = false) {
+        if (sessions.find(processId) == sessions.end() || 
+            !sessions[processId].memoryLayout) {
+            return false;
+        }
+        
+        auto& pageTable = sessions[processId].memoryLayout->pageTable;
+        int pageNumber = virtualAddress / config.mem_per_frame;
+        int offset = virtualAddress % config.mem_per_frame;
+        
+        if (pageNumber >= pageTable.numPages) {
+            return false; // Invalid address
+        }
+        
+        PageEntry& pageEntry = pageTable.pages[pageNumber];
+        
+        // Check if page is loaded
+        if (!pageEntry.isLoaded) {
+            // Page fault occurred
+            if (!handlePageFault(processId, pageNumber)) {
+                return false;
+            }
+        }
+        
+        // Update access information
+        {
+            std::lock_guard<std::mutex> lock(framesMutex);
+            if (pageEntry.physicalFrame >= 0 && pageEntry.physicalFrame < config.num_frames) {
+                physicalFrames[pageEntry.physicalFrame].lastAccessed = Clock::now();
+                if (isWrite) {
+                    physicalFrames[pageEntry.physicalFrame].isDirty = true;
+                    pageEntry.isDirty = true;
+                }
+            }
+        }
+        
+        pageEntry.isAccessed = true;
+        
+        return true;
+    }
+    
+    // Free all pages for a process
+    void freeProcessPages(int processId) {
+        std::lock_guard<std::mutex> lock(framesMutex);
+        
+        for (int i = 0; i < config.num_frames; ++i) {
+            if (physicalFrames[i].isOccupied && physicalFrames[i].processId == processId) {
+                physicalFrames[i].processId = -1;
+                physicalFrames[i].pageNumber = -1;
+                physicalFrames[i].isOccupied = false;
+                physicalFrames[i].isDirty = false;
+                freeFrames.push(i);
+            }
+        }
+    }
+    
+    // Get statistics
+    void getStatistics(int& pageFaults, int& pageReplacements, int& framesUsed) {
+        std::lock_guard<std::mutex> lock(framesMutex);
+        pageFaults = pageFaultCount;
+        pageReplacements = pageReplacementCount;
+        framesUsed = config.num_frames - freeFrames.size();
+    }
+    
+    // Display frame table
+    void displayFrameTable() {
+        std::lock_guard<std::mutex> lock(framesMutex);
+        
+        std::cout << "\n===== PHYSICAL FRAME TABLE =====\n";
+        std::cout << "Frame# | Process ID | Page# | Occupied | Dirty | Last Accessed\n";
+        std::cout << "-------|------------|-------|----------|-------|---------------\n";
+        
+        for (int i = 0; i < config.num_frames; ++i) {
+            const auto& frame = physicalFrames[i];
+            std::cout << std::setw(6) << i << " | ";
+            
+            if (frame.isOccupied) {
+                std::cout << std::setw(10) << frame.processId << " | ";
+                std::cout << std::setw(5) << frame.pageNumber << " | ";
+                std::cout << std::setw(8) << "Yes" << " | ";
+                std::cout << std::setw(5) << (frame.isDirty ? "Yes" : "No") << " | ";
+                
+                auto time_t_val = Clock::to_time_t(frame.lastAccessed);
+                std::cout << std::put_time(std::localtime(&time_t_val), "%H:%M:%S");
+            } else {
+                std::cout << std::setw(10) << "N/A" << " | ";
+                std::cout << std::setw(5) << "N/A" << " | ";
+                std::cout << std::setw(8) << "No" << " | ";
+                std::cout << std::setw(5) << "N/A" << " | ";
+                std::cout << "N/A";
+            }
+            std::cout << "\n";
+        }
+        
+        int pageFaults, pageReplacements, framesUsed;
+        getStatistics(pageFaults, pageReplacements, framesUsed);
+        
+        std::cout << "\nSTATISTICS:\n";
+        std::cout << "  Total Page Faults: " << pageFaults << "\n";
+        std::cout << "  Page Replacements: " << pageReplacements << "\n";
+        std::cout << "  Frames Used: " << framesUsed << "/" << config.num_frames << "\n";
+        std::cout << "  Free Frames: " << (config.num_frames - framesUsed) << "\n\n";
+    }
+};
+
+// Convert hexadecimal string to integer
+int hexToInt(const std::string& hexStr) {
+    return std::stoi(hexStr, nullptr, 16);
+}
+
+// Global demand paging allocator instance
+DemandPagingAllocator demandPagingAllocator;
+
+// Memory access functions with demand paging
+bool readMemory(int processId, int virtualAddress, int& value) {
+    if (demandPagingAllocator.accessMemory(processId, virtualAddress, false)) {
+        // Simulate reading value (simplified)
+        value = virtualAddress % 1000; // Dummy value based on address
+        return true;
+    }
+    return false;
+}
+
+bool writeMemory(int processId, int virtualAddress, int value) {
+    return demandPagingAllocator.accessMemory(processId, virtualAddress, true);
+}
+
+// Execute instruction with memory access simulation
+bool executeInstructionWithPaging(int processId, const Instruction& instruction) {
+    auto& variables = sessions[processId].variables;
+    
+    try {
+        switch (instruction.type) {
+            case InstructionType::DECLARE: {
+                std::string varName = instruction.operands[0];
+                int value = std::stoi(instruction.operands[1]);
+                variables.variables[varName] = value;
+                
+                // Simulate memory access for variable storage
+                int address = std::hash<std::string>{}(varName) % sessions[processId].memorySize;
+                writeMemory(processId, address, value);
+                break;
+            }
+            
+            case InstructionType::READ: {
+                std::string varName = instruction.operands[0];
+                int address = hexToInt(instruction.operands[1]);
+                
+                if (address >= sessions[processId].memorySize) {
+                    std::cerr << "Error: Address out of bounds\n";
+                    return false;
+                }
+                
+                int value;
+                if (readMemory(processId, address, value)) {
+                    variables.variables[varName] = value;
+                } else {
+                    std::cerr << "Error: Failed to read memory at address " << instruction.operands[1] << "\n";
+                    return false;
+                }
+                break;
+            }
+            
+            case InstructionType::WRITE: {
+                int address = hexToInt(instruction.operands[0]);
+                std::string varName = instruction.operands[1];
+                
+                if (address >= sessions[processId].memorySize) {
+                    std::cerr << "Error: Address out of bounds\n";
+                    return false;
+                }
+                
+                if (variables.variables.find(varName) == variables.variables.end()) {
+                    std::cerr << "Error: Variable '" << varName << "' not found\n";
+                    return false;
+                }
+                
+                int value = variables.variables[varName];
+                if (!writeMemory(processId, address, value)) {
+                    std::cerr << "Error: Failed to write memory at address " << instruction.operands[0] << "\n";
+                    return false;
+                }
+                break;
+            }
+            
+            case InstructionType::ADD:
+            case InstructionType::SUB:
+            case InstructionType::MUL:
+            case InstructionType::DIV: {
+                std::string resultVar = instruction.operands[0];
+                
+                // Get operand values
+                int op1, op2;
+                
+                // First operand
+                if (variables.variables.find(instruction.operands[1]) != variables.variables.end()) {
+                    op1 = variables.variables[instruction.operands[1]];
+                } else {
+                    try {
+                        op1 = std::stoi(instruction.operands[1]);
+                    } catch (const std::exception&) {
+                        std::cerr << "Error: Invalid operand '" << instruction.operands[1] << "'\n";
+                        return false;
+                    }
+                }
+                
+                // Second operand
+                if (variables.variables.find(instruction.operands[2]) != variables.variables.end()) {
+                    op2 = variables.variables[instruction.operands[2]];
+                } else {
+                    try {
+                        op2 = std::stoi(instruction.operands[2]);
+                    } catch (const std::exception&) {
+                        std::cerr << "Error: Invalid operand '" << instruction.operands[2] << "'\n";
+                        return false;
+                    }
+                }
+                
+                // Perform operation
+                int result;
+                switch (instruction.type) {
+                    case InstructionType::ADD: result = op1 + op2; break;
+                    case InstructionType::SUB: result = op1 - op2; break;
+                    case InstructionType::MUL: result = op1 * op2; break;
+                    case InstructionType::DIV: 
+                        if (op2 == 0) {
+                            std::cerr << "Error: Division by zero\n";
+                            return false;
+                        }
+                        result = op1 / op2; 
+                        break;
+                    default: return false;
+                }
+                
+                variables.variables[resultVar] = result;
+                
+                // Simulate memory access for result storage
+                int address = std::hash<std::string>{}(resultVar) % sessions[processId].memorySize;
+                writeMemory(processId, address, result);
+                break;
+            }
+            
+            case InstructionType::PRINT: {
+                std::string content = instruction.operands[0];
+                
+                // Check if it's a variable
+                if (variables.variables.find(content) != variables.variables.end()) {
+                    std::cout << "Process " << processId << " prints: " << variables.variables[content] << "\n";
+                } else {
+                    std::cout << "Process " << processId << " prints: " << content << "\n";
+                }
+                break;
+            }
+        }
+        
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "Error executing instruction: " << e.what() << "\n";
+        return false;
+    }
+}
+
+// ===== END DEMAND PAGING ALLOCATOR IMPLEMENTATION =====
+
 void createProcessMemoryLayout(int pid, int memorySize) {
     sessions[pid].memoryLayout = std::make_unique<ProcessMemoryLayout>(memorySize);
     
@@ -206,7 +642,7 @@ void displayPageTable(int pid) {
     const auto& pageTable = sessions[pid].memoryLayout->pageTable;
     std::cout << "Page Table for Process " << pid << " (" << processNames[pid] << "):\n";
     std::cout << "Total Pages: " << pageTable.numPages << "\n";
-    std::cout << "Page Size: " << MEM_PER_FRAME << " bytes\n\n";
+    std::cout << "Page Size: " << config.mem_per_frame << " bytes\n\n";
     
     std::cout << "Page# | Physical Frame | Loaded | Dirty | Accessed\n";
     std::cout << "------|----------------|--------|-------|----------\n";
@@ -293,10 +729,6 @@ bool isValidAddress(const std::string& addr) {
     }
     
     return true;
-}
-
-int hexToInt(const std::string& hexStr) {
-    return std::stoi(hexStr, nullptr, 16);
 }
 
 bool parseInstruction(const std::string& instrStr, Instruction& instruction) {
@@ -566,7 +998,7 @@ bool isPowerOfTwo(int n) {
 }
 
 bool isValidMemorySize(int size) {
-    return size >= MIN_MEMORY_SIZE && size <= MAX_MEMORY_SIZE && isPowerOfTwo(size);
+    return size >= config.min_memory_size && size <= config.max_memory_size && isPowerOfTwo(size);
 }
 
 bool parseScreenCommand(const std::string& cmd, std::string& processName, int& memorySize) {
@@ -575,7 +1007,7 @@ bool parseScreenCommand(const std::string& cmd, std::string& processName, int& m
     
     if (lastSpace == std::string::npos) {
         processName = args;
-        memorySize = MEM_PER_PROC;
+        memorySize = config.mem_per_proc;
         return true;
     }
     
@@ -633,7 +1065,7 @@ void cpuWorker(int coreId) {
 
         std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
         std::ofstream ofs(fname.c_str(), std::ios::trunc);
-        for (int i = 0; i < PRINTS_PER_PROCESS; ++i) {
+        for (int i = 0; i < config.prints_per_process; ++i) {
             auto now = Clock::now();
             ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
                 << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
@@ -711,14 +1143,14 @@ void snapshotMemory() {
     int externalFrag = 0;
     for (const auto& block : memoryBlocks) {
         if (block.pid != -1) ++procCount;
-        else if ((block.end - block.start + 1) < MEM_PER_PROC)
+        else if ((block.end - block.start + 1) < config.mem_per_proc)
             externalFrag += (block.end - block.start + 1);
     }
 
     ofs << "Number of processes in memory: " << procCount << "\n";
     ofs << "Total external fragmentation in KB: " << externalFrag / 1024 << "\n\n";
 
-    ofs << "----end---- = " << MAX_MEM << "\n\n";
+    ofs << "----end---- = " << config.max_overall_mem << "\n\n";
 
     for (auto it = memoryBlocks.rbegin(); it != memoryBlocks.rend(); ++it) {
         const auto& block = *it;
@@ -753,7 +1185,7 @@ void generateMemoryReport() {
     ofs << "||======================================||\n\n";
     ofs << "Generated: " << buffer << "\n\n";
 
-    int totalMemory = MAX_MEM;
+    int totalMemory = config.max_overall_mem;
     int usedMemory = 0;
     int freeMemory = 0;
     int externalFrag = 0;
@@ -766,7 +1198,7 @@ void generateMemoryReport() {
         } else {
             int blockSize = block.end - block.start + 1;
             freeMemory += blockSize;
-            if (blockSize < MEM_PER_PROC) {
+            if (blockSize < config.mem_per_proc) {
                 externalFrag += blockSize;
             }
         }
@@ -799,7 +1231,7 @@ void generateMemoryReport() {
     }
 
     ofs << "\nMEMORY LAYOUT:\n";
-    ofs << "----end---- = " << MAX_MEM << "\n\n";
+    ofs << "----end---- = " << config.max_memory_size << "\n\n";
 
     for (auto it = memoryBlocks.rbegin(); it != memoryBlocks.rend(); ++it) {
         const auto& block = *it;
@@ -827,16 +1259,16 @@ void schedulerThread() {
     if (config.scheduler == "rr") {
         std::queue<int> readyQueue;
 
-        for (int pid = 1; pid <= NUM_PROCESSES; ++pid) {
+        for (int pid = 1; pid <= config.num_processes; ++pid) {
             readyQueue.push(pid);
             Session s;
             s.start = Clock::now();
             s.finished = false;
-            s.memorySize = MEM_PER_PROC;
+            s.memorySize = config.mem_per_proc;
             sessions[pid] = std::move(s);
             processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
 
-            createProcessMemoryLayout(pid, MEM_PER_PROC);
+            createProcessMemoryLayout(pid, config.mem_per_proc);
         }
 
         int currentCore = 0;
@@ -877,7 +1309,7 @@ void schedulerThread() {
             coreCVs[i].notify_all();
 
     } else {
-        for (int pid = 1; pid <= NUM_PROCESSES; ++pid) {
+        for (int pid = 1; pid <= config.num_processes; ++pid) {
             int assignedCore = (pid - 1) % config.num_cpu;
             {
                 std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
@@ -886,11 +1318,11 @@ void schedulerThread() {
                 Session s;
                 s.start = Clock::now();
                 s.finished = false;
-                s.memorySize = MEM_PER_PROC;
+                s.memorySize = config.mem_per_proc;
                 sessions[pid] = std::move(s);
                 processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
                 
-                createProcessMemoryLayout(pid, MEM_PER_PROC);
+                createProcessMemoryLayout(pid, config.mem_per_proc);
             }
             coreCVs[assignedCore].notify_one();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -962,7 +1394,7 @@ int main() {
         }
 
         memoryBlocks.clear();
-        memoryBlocks.push_back({0, MAX_MEM - 1, -1}); 
+        memoryBlocks.push_back({0, config.max_memory_size - 1, -1}); 
 
         if (cmd == "scheduler-test") {
             stopScheduler = false;
@@ -1013,7 +1445,7 @@ int main() {
             if (!isValidMemorySize(memorySize)) {
                 std::cout << "Error: Invalid memory size (" << memorySize << " bytes).\n";
                 std::cout << "Memory size must be:\n";
-                std::cout << "  - Between " << MIN_MEMORY_SIZE << " and " << MAX_MEMORY_SIZE << " bytes\n";
+                std::cout << "  - Between " << config.min_memory_size << " and " << config.max_memory_size << " bytes\n";
                 std::cout << "  - A power of 2 (e.g., 64, 128, 256, 512, 1024, 2048, 4096, ...)\n";
                 continue;
             }
@@ -1071,7 +1503,7 @@ int main() {
             if (!isValidMemorySize(memorySize)) {
                 std::cout << "Error: Invalid memory size (" << memorySize << " bytes).\n";
                 std::cout << "Memory size must be:\n";
-                std::cout << "  - Between " << MIN_MEMORY_SIZE << " and " << MAX_MEMORY_SIZE << " bytes\n";
+                std::cout << "  - Between " << config.min_memory_size << " and " << config.max_memory_size << " bytes\n";
                 std::cout << "  - A power of 2 (e.g., 64, 128, 256, 512, 1024, 2048, 4096, ...)\n";
                 continue;
             }
@@ -1117,7 +1549,7 @@ int main() {
                 ifs.close();
 
                 int current_line = log_count;
-                int total_lines = PRINTS_PER_PROCESS;
+                int total_lines = config.prints_per_process;
                 std::cout << "\nCurrent instruction line: " << current_line << "\n";
                 std::cout << "Lines of code: " << total_lines << "\n";
 
@@ -1240,7 +1672,33 @@ int main() {
             ofs << "------------------------------------------\n";
             ofs.close();
             std::cout << "Report generated at C:/csopesy-log.txt!\n";
-        } 
+        }
+        else if (cmd == "test-pagetable") {
+            // Create a test process
+            int testPid = next_pid++;
+            processNames[testPid] = "test_process";
+            Session s;
+            s.start = Clock::now();
+            s.finished = false;
+            s.memorySize = 1024; // 1KB for testing
+            sessions[testPid] = std::move(s);
+            
+            createProcessMemoryLayout(testPid, 1024);
+            
+            // Simulate some memory accesses
+            std::cout << "\nSimulating memory accesses...\n";
+            writeMemory(testPid, 0x0, 42);    // First page
+            writeMemory(testPid, 0x10, 123);  // Still first page
+            writeMemory(testPid, 0x20, 456);  // Second page
+            int value;
+            readMemory(testPid, 0x0, value);  // Read from first page
+            
+            std::cout << "\nPage Table after memory accesses:\n";
+            displayPageTable(testPid);
+        }
+        else if (cmd == "frametable") {
+            demandPagingAllocator.displayFrameTable();
+        }
         else if (cmd == "help") {
             std::cout << "\nAvailable Commands:\n";
             std::cout << "  initialize                    - Initialize the system\n";
@@ -1251,6 +1709,7 @@ int main() {
             std::cout << "  pagetable <pid>              - Show page table for process\n";
             std::cout << "  segments <pid>               - Show memory segments for process\n";
             std::cout << "  test-pagetable               - Run page table creation tests\n";
+            std::cout << "  frametable                   - Display physical frame table\n";
             std::cout << "  report-util                  - Generate utilization report\n";
             std::cout << "  help                         - Show this help message\n";
             std::cout << "  exit                         - Exit the program\n\n";
