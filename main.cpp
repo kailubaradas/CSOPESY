@@ -25,6 +25,26 @@ struct PageEntry {
     PageEntry() : physicalFrame(-1), isLoaded(false), isDirty(false), isAccessed(false) {}
 };
 
+struct Config {
+    int num_cpu;
+    std::string scheduler;
+    int quantum_cycles;
+    int batch_process_freq;
+    int min_ins;
+    int max_ins;
+    int delays_per_exec;
+    int num_processes = 10;
+    int prints_per_process = 100;
+    int max_overall_mem;
+    int mem_per_frame;
+    int mem_per_proc = 4096;
+    int min_memory_size = 64;
+    int max_memory_size = 65536;
+    int num_frames = 1024;
+    int backing_store_size = 65536;
+};
+Config config;
+
 struct PageTable {
     std::vector<PageEntry> pages;
     int numPages;
@@ -104,25 +124,7 @@ struct Session {
     Session& operator=(Session&&) = default;
 };
 
-struct Config {
-    int num_cpu;
-    std::string scheduler;
-    int quantum_cycles;
-    int batch_process_freq;
-    int min_ins;
-    int max_ins;
-    int delays_per_exec;
-    int num_processes = 10;
-    int prints_per_process = 100;
-    int max_overall_mem;
-    int mem_per_frame;
-    int mem_per_proc = 4096;
-    int min_memory_size = 64;
-    int max_memory_size = 65536;
-    int num_frames = 1024;
-    int backing_store_size = 65536;
-};
-Config config;
+
 
 bool readConfig(const std::string& filename, Config& config) {
     std::ifstream file(filename.c_str());
@@ -241,6 +243,7 @@ class DemandPagingAllocator {
 private:
     std::vector<PhysicalFrame> physicalFrames;
     std::queue<int> freeFrames;
+    std::queue<int> fifoQueue;
     BackingStore backingStore;
     std::mutex framesMutex;
     int pageFaultCount;
@@ -318,18 +321,18 @@ public:
         int frameNumber = -1;
         
         // Try to get a free frame
-        if (!freeFrames.empty()) {
-            frameNumber = freeFrames.front();
-            freeFrames.pop();
-        } else {
-            // No free frames, use LRU replacement
-            frameNumber = findLRUFrame();
-            if (frameNumber != -1) {
-                evictPage(frameNumber);
-            } else {
-                return false; // No frame available
-            }
-        }
+       if (!freeFrames.empty()) {
+    frameNumber = freeFrames.front();
+    freeFrames.pop();
+    fifoQueue.push(frameNumber);
+} else {
+    // evict oldest in FIFO
+    frameNumber = fifoQueue.front();
+    fifoQueue.pop();
+    evictPage(frameNumber);
+    fifoQueue.push(frameNumber);
+    pageReplacementCount++;
+}
         
         // Load page from backing store
         std::vector<int> pageData = backingStore.loadPage(processId, pageNumber);
