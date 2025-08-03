@@ -208,6 +208,34 @@ struct PhysicalFrame {
                                  isOccupied(false), isDirty(false), lastAccessed(Clock::now()) {}
 };
 
+void writePageToBackingStore(int processId, int pageNumber, const std::vector<int>& pageData) {
+    std::ofstream ofs("csopesy-backing-store.txt", std::ios::app);
+    if (!ofs) return;
+    ofs << "PID " << processId << " PAGE " << pageNumber << " DATA";
+    for (int val : pageData) ofs << " " << val;
+    ofs << "\n";
+}
+
+std::vector<int> readPageFromBackingStore(int processId, int pageNumber) {
+    std::ifstream ifs("csopesy-backing-store.txt");
+    std::vector<int> pageData(config.mem_per_frame / sizeof(int), 0);
+    if (!ifs) return pageData;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        std::istringstream iss(line);
+        std::string pidLabel, pageLabel, dataLabel;
+        int pid, page;
+        iss >> pidLabel >> pid >> pageLabel >> page >> dataLabel;
+        if (pid == processId && page == pageNumber) {
+            for (int& val : pageData) {
+                if (!(iss >> val)) break;
+            }
+            break;
+        }
+    }
+    return pageData;
+}
+
 // Backing Store Simulation
 struct BackingStore {
     std::vector<std::vector<int>> processPages;  // [processId][pageNumber] -> data
@@ -222,19 +250,12 @@ struct BackingStore {
     
     void storePage(int processId, int pageNumber, const std::vector<int>& pageData) {
         std::lock_guard<std::mutex> lock(backingStoreMutex);
-        if (processId < processPages.size() && pageNumber < processPages[processId].size()) {
-            // Simulate storing page data (simplified as single integer)
-            processPages[processId][pageNumber] = pageData.empty() ? 0 : pageData[0];
-        }
+        writePageToBackingStore(processId, pageNumber, pageData);
     }
-    
+
     std::vector<int> loadPage(int processId, int pageNumber) {
         std::lock_guard<std::mutex> lock(backingStoreMutex);
-        std::vector<int> pageData(config.mem_per_frame / sizeof(int), 0);
-        if (processId < processPages.size() && pageNumber < processPages[processId].size()) {
-            pageData[0] = processPages[processId][pageNumber];
-        }
-        return pageData;
+        return readPageFromBackingStore(processId, pageNumber);
     }
 };
 
