@@ -25,6 +25,13 @@ struct PageEntry {
     PageEntry() : physicalFrame(-1), isLoaded(false), isDirty(false), isAccessed(false) {}
 };
 
+std::string trim(const std::string &s) {
+    auto l = s.find_first_not_of(" \t\r\n");
+    if (l == std::string::npos) return "";
+    auto r = s.find_last_not_of(" \t\r\n");
+    return s.substr(l, r - l + 1);
+}
+
 struct Config {
     int num_cpu;
     std::string scheduler;
@@ -459,8 +466,13 @@ public:
                 std::cout << std::setw(8) << "Yes" << " | ";
                 std::cout << std::setw(5) << (frame.isDirty ? "Yes" : "No") << " | ";
                 
+                // Fixed time formatting - use the same method as formatTimestamp
                 auto time_t_val = Clock::to_time_t(frame.lastAccessed);
-                std::cout << std::put_time(std::localtime(&time_t_val), "%H:%M:%S");
+                std::tm* tm = std::localtime(&time_t_val);
+                std::cout << std::setfill('0')
+                        << std::setw(2) << tm->tm_hour << ':'
+                        << std::setw(2) << tm->tm_min << ':'
+                        << std::setw(2) << tm->tm_sec;
             } else {
                 std::cout << std::setw(10) << "N/A" << " | ";
                 std::cout << std::setw(5) << "N/A" << " | ";
@@ -480,6 +492,7 @@ public:
         std::cout << "  Frames Used: " << framesUsed << "/" << config.num_frames << "\n";
         std::cout << "  Free Frames: " << (config.num_frames - framesUsed) << "\n\n";
     }
+
 };
 
 // Convert hexadecimal string to integer
@@ -518,6 +531,8 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 // Simulate memory access for variable storage
                 int address = std::hash<std::string>{}(varName) % sessions[processId].memorySize;
                 writeMemory(processId, address, value);
+                
+                std::cout << "Process " << processId << " declared " << varName << " = " << value << "\n";
                 break;
             }
             
@@ -526,13 +541,15 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 int address = hexToInt(instruction.operands[1]);
                 
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Error: Address out of bounds\n";
+                    std::cerr << "Error: Address " << instruction.operands[1] << " out of bounds\n";
                     return false;
                 }
                 
                 int value;
                 if (readMemory(processId, address, value)) {
                     variables.variables[varName] = value;
+                    std::cout << "Process " << processId << " read " << varName << " = " << value 
+                              << " from " << instruction.operands[1] << "\n";
                 } else {
                     std::cerr << "Error: Failed to read memory at address " << instruction.operands[1] << "\n";
                     return false;
@@ -545,17 +562,20 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 std::string varName = instruction.operands[1];
                 
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Error: Address out of bounds\n";
+                    std::cerr << "Error: Address " << instruction.operands[0] << " out of bounds\n";
                     return false;
                 }
                 
                 if (variables.variables.find(varName) == variables.variables.end()) {
-                    std::cerr << "Error: Variable '" << varName << "' not found\n";
+                    std::cerr << "Error: Variable '" << varName << "' not declared\n";
                     return false;
                 }
                 
                 int value = variables.variables[varName];
-                if (!writeMemory(processId, address, value)) {
+                if (writeMemory(processId, address, value)) {
+                    std::cout << "Process " << processId << " wrote " << varName << " (" << value 
+                              << ") to " << instruction.operands[0] << "\n";
+                } else {
                     std::cerr << "Error: Failed to write memory at address " << instruction.operands[0] << "\n";
                     return false;
                 }
@@ -571,7 +591,7 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 // Get operand values
                 int op1, op2;
                 
-                // First operand
+                // First operand - can be variable or constant
                 if (variables.variables.find(instruction.operands[1]) != variables.variables.end()) {
                     op1 = variables.variables[instruction.operands[1]];
                 } else {
@@ -583,7 +603,7 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                     }
                 }
                 
-                // Second operand
+                // Second operand - can be variable or constant
                 if (variables.variables.find(instruction.operands[2]) != variables.variables.end()) {
                     op2 = variables.variables[instruction.operands[2]];
                 } else {
@@ -597,16 +617,18 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 
                 // Perform operation
                 int result;
+                std::string op_str;
                 switch (instruction.type) {
-                    case InstructionType::ADD: result = op1 + op2; break;
-                    case InstructionType::SUB: result = op1 - op2; break;
-                    case InstructionType::MUL: result = op1 * op2; break;
+                    case InstructionType::ADD: result = op1 + op2; op_str = "+"; break;
+                    case InstructionType::SUB: result = op1 - op2; op_str = "-"; break;
+                    case InstructionType::MUL: result = op1 * op2; op_str = "*"; break;
                     case InstructionType::DIV: 
                         if (op2 == 0) {
                             std::cerr << "Error: Division by zero\n";
                             return false;
                         }
                         result = op1 / op2; 
+                        op_str = "/";
                         break;
                     default: return false;
                 }
@@ -616,17 +638,44 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 // Simulate memory access for result storage
                 int address = std::hash<std::string>{}(resultVar) % sessions[processId].memorySize;
                 writeMemory(processId, address, result);
+                
+                std::cout << "Process " << processId << " computed " << resultVar << " = " 
+                          << op1 << " " << op_str << " " << op2 << " = " << result << "\n";
                 break;
             }
             
             case InstructionType::PRINT: {
                 std::string content = instruction.operands[0];
                 
-                // Check if it's a variable
+                // Handle simple variable printing
                 if (variables.variables.find(content) != variables.variables.end()) {
                     std::cout << "Process " << processId << " prints: " << variables.variables[content] << "\n";
                 } else {
-                    std::cout << "Process " << processId << " prints: " << content << "\n";
+                    // Handle string literals and basic string concatenation
+                    std::string output = content;
+                    
+                    // Simple string + variable handling (basic implementation)
+                    size_t plusPos = content.find(" + ");
+                    if (plusPos != std::string::npos) {
+                        std::string leftPart = trim(content.substr(0, plusPos));
+                        std::string rightPart = trim(content.substr(plusPos + 3));
+                        
+                        // Remove quotes from string literals
+                        if (leftPart.front() == '"' && leftPart.back() == '"') {
+                            leftPart = leftPart.substr(1, leftPart.length() - 2);
+                        }
+                        
+                        if (variables.variables.find(rightPart) != variables.variables.end()) {
+                            output = leftPart + std::to_string(variables.variables[rightPart]);
+                        } else {
+                            output = leftPart + rightPart;
+                        }
+                    } else if (content.front() == '"' && content.back() == '"') {
+                        // Remove quotes from string literals
+                        output = content.substr(1, content.length() - 2);
+                    }
+                    
+                    std::cout << "Process " << processId << " prints: " << output << "\n";
                 }
                 break;
             }
@@ -706,13 +755,6 @@ void displayMemorySegments(int pid) {
         std::cout << std::setw(11) << segment.size << "\n";
     }
     std::cout << "\n";
-}
-
-std::string trim(const std::string &s) {
-    auto l = s.find_first_not_of(" \t\r\n");
-    if (l == std::string::npos) return "";
-    auto r = s.find_last_not_of(" \t\r\n");
-    return s.substr(l, r - l + 1);
 }
 
 std::vector<std::string> split(const std::string& str, char delimiter) {
@@ -961,10 +1003,15 @@ bool parseScreenCommandWithInstructions(const std::string& cmd, std::string& pro
     
     processName = parts[0];
     
+    if (processName.empty()) {
+        std::cerr << "Error: Process name cannot be empty\n";
+        return false;
+    }
+    
     try {
         memorySize = std::stoi(parts[1]);
     } catch (const std::exception&) {
-        std::cerr << "Error: Invalid memory size\n";
+        std::cerr << "Error: Invalid memory size format\n";
         return false;
     }
     
@@ -1071,7 +1118,7 @@ std::string formatTimestamp(const Clock::time_point &tp) {
     return oss.str();
 }
 
-void cpuWorker(int coreId) {
+void cpuWorkerWithInstructions(int coreId) {
     while (!stopScheduler || !coreQueues[coreId].empty()) {
         int pid = -1;
         {
@@ -1087,15 +1134,38 @@ void cpuWorker(int coreId) {
 
         if (pid == -1) continue;
 
-        std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
-        std::ofstream ofs(fname.c_str(), std::ios::trunc);
-        for (int i = 0; i < config.prints_per_process; ++i) {
-            auto now = Clock::now();
-            ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
-                << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Check if process has custom instructions
+        if (!sessions[pid].instructions.empty()) {
+            std::cout << "\nExecuting custom instructions for process " << pid 
+                      << " (" << processNames[pid] << "):\n";
+            
+            // Execute each instruction
+            for (size_t i = 0; i < sessions[pid].instructions.size(); ++i) {
+                const auto& instruction = sessions[pid].instructions[i];
+                std::cout << "Instruction " << (i + 1) << "/" << sessions[pid].instructions.size() << ": ";
+                
+                if (!executeInstructionWithPaging(pid, instruction)) {
+                    std::cerr << "Failed to execute instruction " << (i + 1) << " for process " << pid << "\n";
+                    break;
+                }
+                
+                // Add delay between instructions
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            std::cout << "Process " << pid << " (" << processNames[pid] << ") completed all instructions.\n\n";
+        } else {
+            // Original behavior for processes without custom instructions
+            std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
+            std::ofstream ofs(fname.c_str(), std::ios::trunc);
+            for (int i = 0; i < config.prints_per_process; ++i) {
+                auto now = Clock::now();
+                ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
+                    << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            ofs.close();
         }
-        ofs.close();
 
         sessions[pid].finished = true;
     }
@@ -1430,7 +1500,7 @@ int main() {
             }
 
             for (int i = 0; i < config.num_cpu; ++i)
-                workers.emplace_back(cpuWorker, i);
+                workers.emplace_back(cpuWorkerWithInstructions, i);
             scheduler = std::thread(schedulerThread);
             std::cout << "Started scheduling. Run 'screen -ls' every 1-2s.\n";
         }
@@ -1451,61 +1521,73 @@ int main() {
             }
         }
         else if (cmd.rfind("screen -c ", 0) == 0) {
-            std::string pname, instructionString;
-            int memorySize;
-            
-            if (!parseScreenCommandWithInstructions(cmd, pname, memorySize, instructionString)) {
-                std::cout << "Error: Invalid command format.\n";
-                std::cout << "Usage: screen -c <process_name> <memory_size> \"<instructions>\"\n";
-                std::cout << "Example: screen -c myprocess 1024 \"DECLARE x 10; ADD result x 5; PRINT(result)\"\n";
-                continue;
-            }
-            
-            if (pname.empty()) {
-                std::cout << "Error: Process name cannot be empty.\n";
-                continue;
-            }
-            
-            if (!isValidMemorySize(memorySize)) {
-                std::cout << "Error: Invalid memory size (" << memorySize << " bytes).\n";
-                std::cout << "Memory size must be:\n";
-                std::cout << "  - Between " << config.min_memory_size << " and " << config.max_memory_size << " bytes\n";
-                std::cout << "  - A power of 2 (e.g., 64, 128, 256, 512, 1024, 2048, 4096, ...)\n";
-                continue;
-            }
-            
-            // Parse instructions
-            std::vector<Instruction> instructions;
-            if (!parseInstructions(instructionString, instructions)) {
-                std::cout << "Error: Failed to parse instructions.\n";
-                continue;
-            }
-            
-            int pid = next_pid++;
-            processNames[pid] = pname;
-            int assignedCore = round_robin_core++ % config.num_cpu;
-            
-            {
-                std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
-                coreQueues[assignedCore].push(pid);
-                Session s;
-                s.start = Clock::now();
-                s.finished = false;
-                s.memorySize = memorySize;
-                s.instructions = instructions;  // Store the parsed instructions
-                sessions[pid] = std::move(s);
-                
-                createProcessMemoryLayout(pid, memorySize);
-            }
-            coreCVs[assignedCore].notify_one();
+    std::string pname, instructionString;
+    int memorySize;
+    
+    // Parse the command
+    if (!parseScreenCommandWithInstructions(cmd, pname, memorySize, instructionString)) {
+        std::cout << "Error: Invalid command format.\n";
+        std::cout << "Usage: screen -c <process_name> <memory_size> \"<instructions>\"\n";
+        std::cout << "Example: screen -c myprocess 1024 \"DECLARE x 10; ADD result x 5; PRINT(result)\"\n";
+        continue;
+    }
+    
+    // Validate process name
+    if (pname.empty()) {
+        std::cout << "Error: Process name cannot be empty.\n";
+        continue;
+    }
+    
+    // Validate memory size
+    if (!isValidMemorySize(memorySize)) {
+        std::cout << "Error: Invalid memory size (" << memorySize << " bytes).\n";
+        std::cout << "Memory size must be:\n";
+        std::cout << "  - Between " << config.min_memory_size << " and " << config.max_memory_size << " bytes\n";
+        std::cout << "  - A power of 2 (e.g., 64, 128, 256, 512, 1024, 2048, 4096, ...)\n";
+        continue;
+    }
+    
+    // Parse and validate instructions
+    std::vector<Instruction> instructions;
+    if (!parseInstructions(instructionString, instructions)) {
+        std::cout << "Error: Failed to parse instructions.\n";
+        continue;
+    }
+    
+    // Validate instruction count
+    if (instructions.size() < 1 || instructions.size() > 50) {
+        std::cout << "Error: Number of instructions must be between 1 and 50. Found: " 
+                  << instructions.size() << "\n";
+        continue;
+    }
+    
+    // Create the process
+    int pid = next_pid++;
+    processNames[pid] = pname;
+    int assignedCore = round_robin_core++ % config.num_cpu;
+    
+    {
+        std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
+        coreQueues[assignedCore].push(pid);
+        Session s;
+        s.start = Clock::now();
+        s.finished = false;
+        s.memorySize = memorySize;
+        s.instructions = instructions;  // Store the parsed instructions
+        sessions[pid] = std::move(s);
+        
+        createProcessMemoryLayout(pid, memorySize);
+    }
+    coreCVs[assignedCore].notify_one();
 
-            std::cout << "Process '" << pname << "' created with " << memorySize << " bytes of memory.\n";
-            std::cout << "Instructions parsed successfully (" << instructions.size() << " instructions).\n";
-            printInstructions(instructions);
-            
-            // Rest of the screen interaction code remains the same...
-            // [Continue with existing screen interaction loop]
-        }
+    std::cout << "Process '" << pname << "' created successfully!\n";
+    std::cout << "  Memory size: " << memorySize << " bytes\n";
+    std::cout << "  Instructions: " << instructions.size() << " parsed successfully\n";
+    std::cout << "  Assigned to core: " << assignedCore << "\n\n";
+    
+    // Display parsed instructions for confirmation
+    printInstructions(instructions);
+}
 
         else if (cmd.rfind("screen -s ", 0) == 0) {
             std::string pname;
