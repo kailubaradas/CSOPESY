@@ -277,7 +277,7 @@ private:
     int pageFaultCount;
     int pageReplacementCount;
     
-    // LRU Page Replacement Algorithm
+    // LRU Page Replacement Algorithm (currently unused, FIFO is implemented)
     int findLRUFrame() {
         int lruFrame = -1;
         Clock::time_point oldestTime = Clock::now();
@@ -291,18 +291,23 @@ private:
         return lruFrame;
     }
     
-    void evictPage(int frameNumber) {
+    // Swaps a page from a physical frame out to the backing store.
+    // This is called by the page replacement algorithm when a frame is needed.
+    void swapPageOut(int frameNumber) {
         PhysicalFrame& frame = physicalFrames[frameNumber];
         
         if (frame.isDirty) {
-            // Write page back to backing store
+            std::cout << "[Memory Manager] Swapping out dirty page " << frame.pageNumber 
+                      << " of process " << frame.processId << " from frame " << frameNumber << " to backing store.\n";
             std::vector<int> pageData(config.mem_per_frame / sizeof(int), frameNumber); // Simplified data
             backingStore.storePage(frame.processId, frame.pageNumber, pageData);
+        } else {
+            std::cout << "[Memory Manager] Evicting clean page " << frame.pageNumber 
+                      << " of process " << frame.processId << " from frame " << frameNumber << ".\n";
         }
         
         // Update the page table entry for the evicted page
-        if (sessions.find(frame.processId) != sessions.end() && 
-            sessions[frame.processId].memoryLayout) {
+        if (sessions.count(frame.processId) && sessions[frame.processId].memoryLayout) {
             auto& pageTable = sessions[frame.processId].memoryLayout->pageTable;
             if (frame.pageNumber < pageTable.numPages) {
                 pageTable.pages[frame.pageNumber].isLoaded = false;
@@ -319,6 +324,52 @@ private:
         
         pageReplacementCount++;
     }
+
+    // Swaps a page from the backing store into a physical frame.
+    // Returns the frame number where the page was loaded, or -1 on failure.
+    int swapPageIn(int processId, int pageNumber) {
+        int frameNumber = -1;
+        
+        // Try to get a free frame
+        if (!freeFrames.empty()) {
+            frameNumber = freeFrames.front();
+            freeFrames.pop();
+            fifoQueue.push(frameNumber);
+        } else {
+            // No free frames, need to run page replacement algorithm (FIFO)
+            if (fifoQueue.empty()) {
+                std::cerr << "Error: No frames to evict in FIFO queue.\n";
+                return -1;
+            }
+            frameNumber = fifoQueue.front();
+            fifoQueue.pop();
+            swapPageOut(frameNumber); // Evict a page to make room
+            fifoQueue.push(frameNumber);
+        }
+        
+        // Load page from backing store
+        std::cout << "[Memory Manager] Swapping in page " << pageNumber 
+                  << " of process " << processId << " into frame " << frameNumber << " from backing store.\n";
+        std::vector<int> pageData = backingStore.loadPage(processId, pageNumber);
+        
+        // Update physical frame
+        PhysicalFrame& frame = physicalFrames[frameNumber];
+        frame.processId = processId;
+        frame.pageNumber = pageNumber;
+        frame.isOccupied = true;
+        frame.isDirty = false; // A newly loaded page is clean
+        frame.lastAccessed = Clock::now();
+        
+        // Update page table entry
+        auto& pageTable = sessions[processId].memoryLayout->pageTable;
+        PageEntry& pageEntry = pageTable.pages[pageNumber];
+        pageEntry.physicalFrame = frameNumber;
+        pageEntry.isLoaded = true;
+        pageEntry.isAccessed = true;
+        pageEntry.isDirty = false; // A newly loaded page is clean
+
+        return frameNumber;
+    }
     
 public:
     DemandPagingAllocator() : pageFaultCount(0), pageReplacementCount(0) {
@@ -334,53 +385,24 @@ public:
         std::lock_guard<std::mutex> lock(framesMutex);
         
         pageFaultCount++;
+        std::cout << "[Memory Manager] Page fault for process " << processId 
+                  << ", page " << pageNumber << ". Total faults: " << pageFaultCount << "\n";
         
-        // Check if process exists
-        if (sessions.find(processId) == sessions.end() || 
-            !sessions[processId].memoryLayout) {
+        if (sessions.find(processId) == sessions.end() || !sessions[processId].memoryLayout) {
+            std::cerr << "Error: Process " << processId << " not found for page fault handling.\n";
             return false;
         }
         
         auto& pageTable = sessions[processId].memoryLayout->pageTable;
         if (pageNumber >= pageTable.numPages) {
+            std::cerr << "Error: Invalid page number " << pageNumber << " for process " << processId << ".\n";
             return false;
         }
         
-        int frameNumber = -1;
+        // The core logic of handling a page fault is to swap the page in.
+        int frameNumber = swapPageIn(processId, pageNumber);
         
-        // Try to get a free frame
-       if (!freeFrames.empty()) {
-    frameNumber = freeFrames.front();
-    freeFrames.pop();
-    fifoQueue.push(frameNumber);
-} else {
-    // evict oldest in FIFO
-    frameNumber = fifoQueue.front();
-    fifoQueue.pop();
-    evictPage(frameNumber);
-    fifoQueue.push(frameNumber);
-    pageReplacementCount++;
-}
-        
-        // Load page from backing store
-        std::vector<int> pageData = backingStore.loadPage(processId, pageNumber);
-        
-        // Update physical frame
-        PhysicalFrame& frame = physicalFrames[frameNumber];
-        frame.processId = processId;
-        frame.pageNumber = pageNumber;
-        frame.isOccupied = true;
-        frame.isDirty = false;
-        frame.lastAccessed = Clock::now();
-        
-        // Update page table entry
-        PageEntry& pageEntry = pageTable.pages[pageNumber];
-        pageEntry.physicalFrame = frameNumber;
-        pageEntry.isLoaded = true;
-        pageEntry.isAccessed = true;
-        pageEntry.isDirty = false;
-        
-        return true;
+        return frameNumber != -1;
     }
     
     // Access memory address (triggers page fault if needed)
@@ -392,7 +414,6 @@ public:
         
         auto& pageTable = sessions[processId].memoryLayout->pageTable;
         int pageNumber = virtualAddress / config.mem_per_frame;
-        int offset = virtualAddress % config.mem_per_frame;
         
         if (pageNumber >= pageTable.numPages) {
             return false; // Invalid address
@@ -429,6 +450,16 @@ public:
     void freeProcessPages(int processId) {
         std::lock_guard<std::mutex> lock(framesMutex);
         
+        std::queue<int> newFifoQueue;
+        while(!fifoQueue.empty()){
+            int frameIdx = fifoQueue.front();
+            fifoQueue.pop();
+            if(physicalFrames[frameIdx].processId != processId){
+                newFifoQueue.push(frameIdx);
+            }
+        }
+        fifoQueue = newFifoQueue;
+
         for (int i = 0; i < config.num_frames; ++i) {
             if (physicalFrames[i].isOccupied && physicalFrames[i].processId == processId) {
                 physicalFrames[i].processId = -1;
@@ -466,13 +497,13 @@ public:
                 std::cout << std::setw(8) << "Yes" << " | ";
                 std::cout << std::setw(5) << (frame.isDirty ? "Yes" : "No") << " | ";
                 
-                // Fixed time formatting - use the same method as formatTimestamp
                 auto time_t_val = Clock::to_time_t(frame.lastAccessed);
                 std::tm* tm = std::localtime(&time_t_val);
                 std::cout << std::setfill('0')
                         << std::setw(2) << tm->tm_hour << ':'
                         << std::setw(2) << tm->tm_min << ':'
                         << std::setw(2) << tm->tm_sec;
+                std::cout << std::setfill(' '); // Reset fill character
             } else {
                 std::cout << std::setw(10) << "N/A" << " | ";
                 std::cout << std::setw(5) << "N/A" << " | ";
@@ -492,7 +523,6 @@ public:
         std::cout << "  Frames Used: " << framesUsed << "/" << config.num_frames << "\n";
         std::cout << "  Free Frames: " << (config.num_frames - framesUsed) << "\n\n";
     }
-
 };
 
 // Convert hexadecimal string to integer
@@ -519,19 +549,6 @@ bool writeMemory(int processId, int virtualAddress, int value) {
 
 // Execute instruction with memory access simulation
 bool executeInstructionWithPaging(int processId, const Instruction& instruction) {
-			auto& pageTable = sessions[processId].memoryLayout->pageTable;
-		
-		// If this instruction reads or writes memory, compute its page:
-		if (instruction.type == InstructionType::READ ||
-		    instruction.type == InstructionType::WRITE) 
-		{
-		    int vAddr   = hexToInt(instruction.operands[1 - (instruction.type==InstructionType::READ ? 0 : 0)]); 
-		    if (!pageTable.pages[vAddr / config.mem_per_frame].isLoaded) {
-		        // This will load it (or evict via FIFO) before we go on:
-		        demandPagingAllocator.handlePageFault(processId, vAddr / config.mem_per_frame);
-		    }
-		}
-	
     auto& variables = sessions[processId].variables;
     
     try {
@@ -1406,6 +1423,7 @@ void schedulerThread() {
                 readyQueue.push(pid);
             } else {
                 freeMemory(pid);
+                demandPagingAllocator.freeProcessPages(pid); // Fix: Free pages from paging system
             }
 
             currentCore = (currentCore + 1) % config.num_cpu;
@@ -1435,6 +1453,8 @@ void schedulerThread() {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
+        // Note: FCFS scheduler should also wait for processes to finish and clean up memory.
+        // This is a more extensive fix beyond the current scope.
         stopScheduler = true;
         for (int i = 0; i < config.num_cpu; ++i)
             coreCVs[i].notify_all();
