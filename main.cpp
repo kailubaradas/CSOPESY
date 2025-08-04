@@ -519,6 +519,19 @@ bool writeMemory(int processId, int virtualAddress, int value) {
 
 // Execute instruction with memory access simulation
 bool executeInstructionWithPaging(int processId, const Instruction& instruction) {
+			auto& pageTable = sessions[processId].memoryLayout->pageTable;
+		
+		// If this instruction reads or writes memory, compute its page:
+		if (instruction.type == InstructionType::READ ||
+		    instruction.type == InstructionType::WRITE) 
+		{
+		    int vAddr   = hexToInt(instruction.operands[1 - (instruction.type==InstructionType::READ ? 0 : 0)]); 
+		    if (!pageTable.pages[vAddr / config.mem_per_frame].isLoaded) {
+		        // This will load it (or evict via FIFO) before we go on:
+		        demandPagingAllocator.handlePageFault(processId, vAddr / config.mem_per_frame);
+		    }
+		}
+	
     auto& variables = sessions[processId].variables;
     
     try {
