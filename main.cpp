@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <iomanip>
 #include "src/config.h"
 #include "src/utils.h"
 #include "src/globals.h"
@@ -11,6 +12,95 @@
 #include "src/scheduler.h"
 #include "src/reports.h"
 #include <fstream>
+
+void displayProcessSmi() {
+
+    auto now = Clock::now();
+    std::time_t t = Clock::to_time_t(now);
+    std::tm* localtm = std::localtime(&t);
+    char datetime[100];
+    std::strftime(datetime, sizeof(datetime), "%a %b %d %H:%M:%S %Y", localtm);
+    
+    int totalProcesses = 0;
+    int runningProcesses = 0;
+    int finishedProcesses = 0;
+    int totalMemoryUsed = 0;
+    
+    for (const auto& entry : sessions) {
+        totalProcesses++;
+        if (entry.second.finished) {
+            finishedProcesses++;
+        } else {
+            runningProcesses++;
+            totalMemoryUsed += entry.second.memorySize;
+        }
+    }
+    
+    int memoryPercentage = (totalMemoryUsed * 100) / config.max_memory_size;
+    
+    int cpuUtil = (runningProcesses > 0) ? std::min(100, (runningProcesses * 100) / config.num_cpu) : 0;
+    
+    std::cout << datetime << "\n";
+    std::cout << "+-----------------------------------------------------------------------------------------+\n";
+    std::cout << "| CSOPESY-SMI 1.0                   Driver Version: 1.0           CSOPESY Version: 0.1    |\n";
+    std::cout << "|-----------------------------------------+------------------------+----------------------+\n";
+    std::cout << "| CPU  Name                  Architecture | Cores Available        | Process Scheduling   |\n";
+    std::cout << "| Util Processes   Active    Memory Usage |           Memory-Total | Scheduler     Mode   |\n";
+    std::cout << "|                                         |                        |                      |\n";
+    std::cout << "|=========================================+========================+======================|\n";
+    std::cout << "|   0  CSOPESY Virtual CPU        x86_64  |   " << std::setw(2) << config.num_cpu << " cores            |                  N/A |\n";
+    std::cout << "| " << std::setw(3) << cpuUtil << "%  " << std::setw(3) << totalProcesses << " procs  " 
+              << std::setw(3) << runningProcesses << " active  " 
+              << std::setw(5) << (totalMemoryUsed/1024) << "KB / " << std::setw(5) << (config.max_memory_size/1024) << "KB |    "
+              << std::setw(5) << (totalMemoryUsed/1024) << "KB / " << std::setw(7) << (config.max_memory_size/1024) << "KB | "
+              << std::setw(5) << config.scheduler << "        Default |\n";
+    std::cout << "|                                         |                        |                  N/A |\n";
+    std::cout << "+-----------------------------------------+------------------------+----------------------+\n";
+    
+    int pageFaults, pageReplacements, framesUsed;
+    demandPagingAllocator.getStatistics(pageFaults, pageReplacements, framesUsed);
+    
+    std::cout << "\n";
+    std::cout << "+-----------------------------------------------------------------------------------------+\n";
+    std::cout << "| Processes:                                                                              |\n";
+    std::cout << "|  CPU   Core  PID     Status   Process name                              Memory Usage   |\n";
+    std::cout << "|                                                                          (KB)           |\n";
+    std::cout << "|=========================================================================================|\n";
+    
+    for (const auto& entry : sessions) {
+        int pid = entry.first;
+        const auto& session = entry.second;
+        std::string processName = processNames[pid];
+        std::string status = session.finished ? "Done" : "Run ";
+        int assignedCore = (pid - 1) % config.num_cpu;
+        int memoryKB = session.memorySize / 1024;
+        
+        if (processName.length() > 30) {
+            processName = "..." + processName.substr(processName.length() - 27);
+        }
+        
+        std::cout << "|   0  " 
+                  << std::setw(4) << assignedCore
+                  << std::setw(6) << pid
+                  << std::setw(9) << status
+                  << std::setw(3) << " "
+                  << std::left << std::setw(33) << processName
+                  << std::right << std::setw(17) << memoryKB
+                  << "   |" << std::endl;
+    }
+    
+    std::cout << "+-----------------------------------------------------------------------------------------+\n";
+    
+    std::cout << "\n";
+    std::cout << "Memory Statistics:\n";
+    std::cout << "  Total Memory: " << config.max_memory_size << " bytes (" << config.max_memory_size/1024 << " KB)\n";
+    std::cout << "  Used Memory: " << totalMemoryUsed << " bytes (" << totalMemoryUsed/1024 << " KB)\n";
+    std::cout << "  Free Memory: " << (config.max_memory_size - totalMemoryUsed) << " bytes (" 
+              << (config.max_memory_size - totalMemoryUsed)/1024 << " KB)\n";
+    std::cout << "  Page Faults: " << pageFaults << "\n";
+    std::cout << "  Page Replacements: " << pageReplacements << "\n";
+    std::cout << "  Frames Used: " << framesUsed << "/" << config.num_frames << "\n";
+}
 
 int main() {
     bool initialized = false;
@@ -321,6 +411,9 @@ int main() {
         }
         else if (cmd == "frametable") {
             demandPagingAllocator.displayFrameTable();
+        } 
+        else if (cmd == "process-smi") {
+            displayProcessSmi();
         }
         else if (cmd == "help") {
             std::cout << "\nAvailable Commands:\n";
