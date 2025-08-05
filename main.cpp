@@ -282,6 +282,21 @@ int main() {
             generateUtilizationReport();
         } else if (cmd == "report-mem") {
             generateMemoryReport();
+        } else if (cmd == "vmstat") {
+            std::cout << "\n===== VMSTAT =====\n";
+            std::cout << "Total CPU Active Ticks: " << total_cpu_active_ticks << "\n";
+            std::cout << "Total CPU Idle Ticks: " << total_cpu_idle_ticks << "\n";
+            std::cout << "\nPer-process CPU Ticks:\n";
+            for (const auto& entry : sessions) {
+                int pid = entry.first;
+                const Session& s = entry.second;
+                std::cout << "PID " << pid << " (" << processNames[pid] << ")"
+                          << ": Active Ticks = " << s.cpu_active_ticks
+                          << ", Idle Ticks = " << s.cpu_idle_ticks
+                          << (s.finished ? " [Finished]" : " [Running]")
+                          << "\n";
+            }
+            std::cout << "===================\n\n";
         }
         else if (cmd == "test-pagetable") {
             int testPid = next_pid++;
@@ -321,6 +336,7 @@ int main() {
             std::cout << "  frametable                   - Display physical frame table\n";
             std::cout << "  report-util                  - Generate utilization report\n";
             std::cout << "  report-mem                   - Generate memory report\n";
+            std::cout << "  vmstat                       - Show CPU tick statistics (active/idle, per-process)\n";
             std::cout << "  help                         - Show this help message\n";
             std::cout << "  exit                         - Exit the program\n\n";
         }
