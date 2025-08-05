@@ -88,6 +88,15 @@ struct ProcessVariables {
     std::map<int, int> memory;
 };
 
+struct CrashInfo {
+    bool hasCrashed = false;
+    Clock::time_point crashTime;
+    std::string invalidAddress;
+    std::string errorMessage;
+    
+    CrashInfo() = default;
+};
+
 struct Session {
     Clock::time_point start;
     bool finished = false;
@@ -95,6 +104,7 @@ struct Session {
     std::unique_ptr<ProcessMemoryLayout> memoryLayout;
     std::vector<Instruction> instructions;
     ProcessVariables variables;
+    CrashInfo crashInfo;
 
     Session() = default;
     Session(const Session&) = delete;

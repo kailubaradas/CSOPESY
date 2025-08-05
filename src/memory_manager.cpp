@@ -265,12 +265,14 @@ void DemandPagingAllocator::displayFrameTable() {
 bool readMemory(int processId, int virtualAddress, int& value) {
     if (demandPagingAllocator.accessMemory(processId, virtualAddress, false)) {
         value = virtualAddress % 1000;
+        value = value & 0xFFFF;
         return true;
     }
     return false;
 }
 
 bool writeMemory(int processId, int virtualAddress, int value) {
+    value = value & 0xFFFF; // Only lower 16 bits (uint16)
     return demandPagingAllocator.accessMemory(processId, virtualAddress, true);
 }
 

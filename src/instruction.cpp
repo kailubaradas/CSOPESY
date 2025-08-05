@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <algorithm>
 
 bool isValidVariableName(const std::string& name) {
     if (name.empty() || !std::isalpha(name[0])) {
@@ -214,11 +215,19 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
     try {
         switch (instruction.type) {
             case InstructionType::DECLARE: {
+                // Enforce symbol table limit
+                if (variables.variables.size() >= 32) {
+                    std::cerr << "Symbol table full for process " << processId << ". DECLARE ignored.\n";
+                    break;
+                }
                 std::string varName = instruction.operands[0];
                 int value = std::stoi(instruction.operands[1]);
+                value = std::clamp(value, 0, 65535); // Clamp to uint16
                 variables.variables[varName] = value;
                 
-                int address = std::hash<std::string>{}(varName) % sessions[processId].memorySize;
+                // Store in symbol table segment (first 64 bytes)
+                int idx = variables.variables.size() - 1;
+                int address = idx * 2; // 2 bytes per variable
                 writeMemory(processId, address, value);
                 
                 std::cout << "Process " << processId << " declared " << varName << " = " << value << "\n";
@@ -228,45 +237,51 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
             case InstructionType::READ: {
                 std::string varName = instruction.operands[0];
                 int address = hexToInt(instruction.operands[1]);
-                
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Error: Address " << instruction.operands[1] << " out of bounds\n";
-                    return false;
+                    std::string hexAddr = instruction.operands[1];
+                    recordCrash(processId, hexAddr, "Address out of bounds");
+                    std::cerr << "Access violation: Address " << hexAddr
+                            << " out of bounds. Process " << processId << " terminated.\n";
+                    break;
                 }
-                
                 int value;
                 if (readMemory(processId, address, value)) {
-                    variables.variables[varName] = value;
-                    std::cout << "Process " << processId << " read " << varName << " = " << value 
-                              << " from " << instruction.operands[1] << "\n";
+                    value = std::clamp(value, 0, 65535);
+                    if (variables.variables.size() < 32 || variables.variables.count(varName)) {
+                        variables.variables[varName] = value;
+                        std::cout << "Process " << processId << " read " << varName << " = " << value
+                                << " from " << instruction.operands[1] << "\n";
+                    } else {
+                        std::cerr << "Symbol table full for process " << processId << ". READ ignored.\n";
+                    }
                 } else {
-                    std::cerr << "Error: Failed to read memory at address " << instruction.operands[1] << "\n";
-                    return false;
+                    std::string hexAddr = instruction.operands[1];
+                    recordCrash(processId, hexAddr, "Failed to read memory");
+                    std::cerr << "Access violation: Failed to read memory at address " << hexAddr
+                            << ". Process " << processId << " terminated.\n";
                 }
                 break;
             }
             
             case InstructionType::WRITE: {
                 int address = hexToInt(instruction.operands[0]);
-                std::string varName = instruction.operands[1];
-                
+                int value = std::stoi(instruction.operands[1]);
+                value = std::clamp(value, 0, 65535);
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Error: Address " << instruction.operands[0] << " out of bounds\n";
-                    return false;
+                    std::string hexAddr = instruction.operands[0];
+                    recordCrash(processId, hexAddr, "Address out of bounds");
+                    std::cerr << "Access violation: Address " << hexAddr
+                            << " out of bounds. Process " << processId << " terminated.\n";
+                    break;
                 }
-                
-                if (variables.variables.find(varName) == variables.variables.end()) {
-                    std::cerr << "Error: Variable '" << varName << "' not declared\n";
-                    return false;
-                }
-                
-                int value = variables.variables[varName];
                 if (writeMemory(processId, address, value)) {
-                    std::cout << "Process " << processId << " wrote " << varName << " (" << value 
-                              << ") to " << instruction.operands[0] << "\n";
+                    std::cout << "Process " << processId << " wrote value " << value
+                            << " to " << instruction.operands[0] << "\n";
                 } else {
-                    std::cerr << "Error: Failed to write memory at address " << instruction.operands[0] << "\n";
-                    return false;
+                    std::string hexAddr = instruction.operands[0];
+                    recordCrash(processId, hexAddr, "Failed to write memory");
+                    std::cerr << "Access violation: Failed to write memory at address " << hexAddr
+                            << ". Process " << processId << " terminated.\n";
                 }
                 break;
             }
