@@ -95,6 +95,8 @@ struct Session {
     std::unique_ptr<ProcessMemoryLayout> memoryLayout;
     std::vector<Instruction> instructions;
     ProcessVariables variables;
+    int cpu_active_ticks = 0;
+    int cpu_idle_ticks = 0;
 
     Session() = default;
     Session(const Session&) = delete;

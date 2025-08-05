@@ -12,3 +12,6 @@ std::vector<MemoryBlock> memoryBlocks;
 std::mutex memoryMutex;
 int snapshotCounter = 0;
 bool enableSnapshots = false;
+
+int total_cpu_active_ticks = 0;
+int total_cpu_idle_ticks = 0;

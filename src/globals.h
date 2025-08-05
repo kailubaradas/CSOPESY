@@ -23,4 +23,7 @@ extern std::mutex memoryMutex;
 extern int snapshotCounter;
 extern bool enableSnapshots;
 
+extern int total_cpu_active_ticks;
+extern int total_cpu_idle_ticks;
+
 #endif // GLOBALS_H

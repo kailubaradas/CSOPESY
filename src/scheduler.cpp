@@ -20,8 +20,16 @@ void cpuWorkerWithInstructions(int coreId) {
             if (!coreQueues[coreId].empty()) {
                 pid = coreQueues[coreId].front();
                 coreQueues[coreId].pop();
+            } else {
+                // Core is idle for this tick
+                total_cpu_idle_ticks++;
+                continue;
             }
         }
+
+        // Core is active for this tick
+        total_cpu_active_ticks++;
+        sessions[pid].cpu_active_ticks++;
 
         if (pid == -1) continue;
 

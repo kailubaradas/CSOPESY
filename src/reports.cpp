@@ -166,6 +166,8 @@ void generateUtilizationReport() {
     ofs << "CPU utilization: " << (coresUsed > 0 ? "100%" : "0%") << "\n";
     ofs << "Cores used: " << coresUsed << "\n";
     ofs << "Cores available: " << 0 << "\n\n";
+    ofs << "Total CPU Active Ticks: " << total_cpu_active_ticks << "\n";
+    ofs << "Total CPU Idle Ticks: " << total_cpu_idle_ticks << "\n\n";
     ofs << "------------------------------------------\n";
     ofs << "Running processes:\n";
     for (const auto& entry : sessions) {
@@ -176,7 +178,8 @@ void generateUtilizationReport() {
             int pages = s.memoryLayout ? s.memoryLayout->pageTable.numPages : 0;
             ofs << name << "  (" << formatTimestamp(s.start) << ")"
                 << "   Core: " << (pid - 1) % config.num_cpu
-                << "   " << 0 << " / ????" 
+                << "   Active Ticks: " << s.cpu_active_ticks
+                << "   Idle Ticks: " << s.cpu_idle_ticks
                 << "   [" << s.memorySize << " bytes, " << pages << " pages]" << "\n";
         }
     }
@@ -190,7 +193,8 @@ void generateUtilizationReport() {
             int pages = s.memoryLayout ? s.memoryLayout->pageTable.numPages : 0;
             ofs << name << "  (" << formatTimestamp(s.start) << ")"
                 << "   Finished   "
-                << "???? / ????" 
+                << "   Active Ticks: " << s.cpu_active_ticks
+                << "   Idle Ticks: " << s.cpu_idle_ticks
                 << "   [" << s.memorySize << " bytes, " << pages << " pages]" << "\n";
         }
     }
