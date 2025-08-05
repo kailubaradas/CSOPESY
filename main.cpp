@@ -13,6 +13,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <atomic>
+#include <algorithm>
 
 using Clock = std::chrono::system_clock;
 
@@ -538,12 +539,14 @@ bool readMemory(int processId, int virtualAddress, int& value) {
     if (demandPagingAllocator.accessMemory(processId, virtualAddress, false)) {
         // Simulate reading value (simplified)
         value = virtualAddress % 1000; // Dummy value based on address
+        value = value & 0xFFFF;
         return true;
     }
     return false;
 }
 
 bool writeMemory(int processId, int virtualAddress, int value) {
+    value = value & 0xFFFF; // Only lower 16 bits (uint16)
     return demandPagingAllocator.accessMemory(processId, virtualAddress, true);
 }
 
@@ -554,14 +557,21 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
     try {
         switch (instruction.type) {
             case InstructionType::DECLARE: {
+                // Enforce symbol table limit
+                if (variables.variables.size() >= 32) {
+                    std::cerr << "Symbol table full for process " << processId << ". DECLARE ignored.\n";
+                    break;
+                }
                 std::string varName = instruction.operands[0];
                 int value = std::stoi(instruction.operands[1]);
+                value = std::clamp(value, 0, 65535); // Clamp to uint16
                 variables.variables[varName] = value;
-                
-                // Simulate memory access for variable storage
-                int address = std::hash<std::string>{}(varName) % sessions[processId].memorySize;
+
+                // Store in symbol table segment (first 64 bytes)
+                int idx = variables.variables.size() - 1;
+                int address = idx * 2; // 2 bytes per variable
                 writeMemory(processId, address, value);
-                
+
                 std::cout << "Process " << processId << " declared " << varName << " = " << value << "\n";
                 break;
             }
@@ -569,45 +579,47 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
             case InstructionType::READ: {
                 std::string varName = instruction.operands[0];
                 int address = hexToInt(instruction.operands[1]);
-                
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Error: Address " << instruction.operands[1] << " out of bounds\n";
-                    return false;
+                    std::cerr << "Access violation: Address " << instruction.operands[1]
+                            << " out of bounds. Process " << processId << " terminated.\n";
+                    sessions[processId].finished = true;
+                    break;
                 }
-                
                 int value;
                 if (readMemory(processId, address, value)) {
-                    variables.variables[varName] = value;
-                    std::cout << "Process " << processId << " read " << varName << " = " << value 
-                              << " from " << instruction.operands[1] << "\n";
+                    value = std::clamp(value, 0, 65535);
+                    if (variables.variables.size() < 32 || variables.variables.count(varName)) {
+                        variables.variables[varName] = value;
+                        std::cout << "Process " << processId << " read " << varName << " = " << value
+                                << " from " << instruction.operands[1] << "\n";
+                    } else {
+                        std::cerr << "Symbol table full for process " << processId << ". READ ignored.\n";
+                    }
                 } else {
-                    std::cerr << "Error: Failed to read memory at address " << instruction.operands[1] << "\n";
-                    return false;
+                    std::cerr << "Access violation: Failed to read memory at address " << instruction.operands[1]
+                            << ". Process " << processId << " terminated.\n";
+                    sessions[processId].finished = true;
                 }
                 break;
             }
             
             case InstructionType::WRITE: {
                 int address = hexToInt(instruction.operands[0]);
-                std::string varName = instruction.operands[1];
-                
+                int value = std::stoi(instruction.operands[1]);
+                value = std::clamp(value, 0, 65535);
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Error: Address " << instruction.operands[0] << " out of bounds\n";
-                    return false;
+                    std::cerr << "Access violation: Address " << instruction.operands[0]
+                            << " out of bounds. Process " << processId << " terminated.\n";
+                    sessions[processId].finished = true;
+                    break;
                 }
-                
-                if (variables.variables.find(varName) == variables.variables.end()) {
-                    std::cerr << "Error: Variable '" << varName << "' not declared\n";
-                    return false;
-                }
-                
-                int value = variables.variables[varName];
                 if (writeMemory(processId, address, value)) {
-                    std::cout << "Process " << processId << " wrote " << varName << " (" << value 
-                              << ") to " << instruction.operands[0] << "\n";
+                    std::cout << "Process " << processId << " wrote value " << value
+                            << " to " << instruction.operands[0] << "\n";
                 } else {
-                    std::cerr << "Error: Failed to write memory at address " << instruction.operands[0] << "\n";
-                    return false;
+                    std::cerr << "Access violation: Failed to write memory at address " << instruction.operands[0]
+                            << ". Process " << processId << " terminated.\n";
+                    sessions[processId].finished = true;
                 }
                 break;
             }
