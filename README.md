@@ -11,11 +11,12 @@ opesy
    ```
    This will compile `main.cpp` and then run the resulting `main.exe`.
 
+
 ### Option 2: Compile and Run Manually
 1. Make sure you have `g++` installed and added to your PATH.
 2. Open a command prompt in this folder and run:
    ```cmd
-   g++ main.cpp -o main.exe
+   g++ src\*.cpp main.cpp -o main.exe -std=c++14 -pthread
    main.exe
    ```
 
