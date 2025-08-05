@@ -117,6 +117,15 @@ struct ProcessVariables {
     std::map<int, int> memory;
 };
 
+struct CrashInfo {
+    bool hasCrashed = false;
+    Clock::time_point crashTime;
+    std::string invalidAddress;
+    std::string errorMessage;
+    
+    CrashInfo() = default;
+};
+
 struct Session {
     Clock::time_point start;
     bool finished = false;
@@ -124,6 +133,7 @@ struct Session {
     std::unique_ptr<ProcessMemoryLayout> memoryLayout;
     std::vector<Instruction> instructions;
     ProcessVariables variables;
+    CrashInfo crashInfo;
     
     Session() = default;
     Session(const Session&) = delete;
@@ -186,6 +196,31 @@ std::atomic<bool> stopScheduler(false);
 std::vector<std::queue<int>> coreQueues;
 std::vector<std::mutex> coreMutexes;
 std::vector<std::condition_variable> coreCVs;
+
+void recordCrash(int processId, const std::string& address, const std::string& error) {
+    if (sessions.find(processId) != sessions.end()) {
+        sessions[processId].crashInfo.hasCrashed = true;
+        sessions[processId].crashInfo.crashTime = Clock::now();
+        sessions[processId].crashInfo.invalidAddress = address;
+        sessions[processId].crashInfo.errorMessage = error;
+        sessions[processId].finished = true;
+        
+        std::cout << "\n[SYSTEM] Process " << processId << " (" 
+                  << (processNames.count(processId) ? processNames[processId] : "unknown")
+                  << ") crashed due to memory access violation.\n";
+    }
+}
+
+std::string formatCrashTime(const Clock::time_point &tp) {
+    std::time_t t = Clock::to_time_t(tp);
+    std::tm tm = *std::localtime(&t);
+    std::ostringstream oss;
+    oss << std::setfill('0')
+        << std::setw(2) << tm.tm_hour << ':'
+        << std::setw(2) << tm.tm_min << ':'
+        << std::setw(2) << tm.tm_sec;
+    return oss.str();
+}
 
 struct MemoryBlock {
     int start;
@@ -580,9 +615,10 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 std::string varName = instruction.operands[0];
                 int address = hexToInt(instruction.operands[1]);
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Access violation: Address " << instruction.operands[1]
+                    std::string hexAddr = instruction.operands[1];
+                    recordCrash(processId, hexAddr, "Address out of bounds");
+                    std::cerr << "Access violation: Address " << hexAddr
                             << " out of bounds. Process " << processId << " terminated.\n";
-                    sessions[processId].finished = true;
                     break;
                 }
                 int value;
@@ -596,9 +632,10 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                         std::cerr << "Symbol table full for process " << processId << ". READ ignored.\n";
                     }
                 } else {
-                    std::cerr << "Access violation: Failed to read memory at address " << instruction.operands[1]
+                    std::string hexAddr = instruction.operands[1];
+                    recordCrash(processId, hexAddr, "Failed to read memory");
+                    std::cerr << "Access violation: Failed to read memory at address " << hexAddr
                             << ". Process " << processId << " terminated.\n";
-                    sessions[processId].finished = true;
                 }
                 break;
             }
@@ -608,18 +645,20 @@ bool executeInstructionWithPaging(int processId, const Instruction& instruction)
                 int value = std::stoi(instruction.operands[1]);
                 value = std::clamp(value, 0, 65535);
                 if (address >= sessions[processId].memorySize) {
-                    std::cerr << "Access violation: Address " << instruction.operands[0]
+                    std::string hexAddr = instruction.operands[0];
+                    recordCrash(processId, hexAddr, "Address out of bounds");
+                    std::cerr << "Access violation: Address " << hexAddr
                             << " out of bounds. Process " << processId << " terminated.\n";
-                    sessions[processId].finished = true;
                     break;
                 }
                 if (writeMemory(processId, address, value)) {
                     std::cout << "Process " << processId << " wrote value " << value
                             << " to " << instruction.operands[0] << "\n";
                 } else {
-                    std::cerr << "Access violation: Failed to write memory at address " << instruction.operands[0]
+                    std::string hexAddr = instruction.operands[0];
+                    recordCrash(processId, hexAddr, "Failed to write memory");
+                    std::cerr << "Access violation: Failed to write memory at address " << hexAddr
                             << ". Process " << processId << " terminated.\n";
-                    sessions[processId].finished = true;
                 }
                 break;
             }
@@ -1632,7 +1671,100 @@ int main() {
     
     // Display parsed instructions for confirmation
     printInstructions(instructions);
-}
+} else if (cmd.rfind("screen -r ", 0) == 0) {
+            std::string processName = trim(cmd.substr(10));
+            
+            if (processName.empty()) {
+                std::cout << "Error: Process name is required.\n";
+                std::cout << "Usage: screen -r <process_name>\n";
+                continue;
+            }
+            
+            // Find process by name
+            int targetPid = -1;
+            for (const auto& entry : processNames) {
+                if (entry.second == processName) {
+                    targetPid = entry.first;
+                    break;
+                }
+            }
+            
+            if (targetPid == -1) {
+                std::cout << "Process " << processName << " not found.\n";
+                continue;
+            }
+            
+            const Session& session = sessions[targetPid];
+            
+            // Check if process crashed
+            if (session.crashInfo.hasCrashed) {
+                std::cout << "Process " << processName 
+                          << " shut down due to memory access violation error that occurred at "
+                          << formatCrashTime(session.crashInfo.crashTime) << ". "
+                          << session.crashInfo.invalidAddress << " invalid.\n";
+                continue;
+            }
+            
+            // Show process screen (existing logic from screen -s)
+            while (true) {
+                clearScreen();
+                std::cout << "Process name: " << processName << "\n";
+                std::cout << "ID: " << targetPid << "\n";
+                std::cout << "Memory size: " << session.memorySize << " bytes\n";
+                
+                if (session.memoryLayout) {
+                    std::cout << "Pages needed: " << session.memoryLayout->pageTable.numPages << "\n";
+                }
+                
+                std::cout << "Logs:\n";
+
+                std::string fname = std::string("screen_") + (targetPid < 10 ? "0" : "") + std::to_string(targetPid) + ".txt";
+                std::ifstream ifs(fname);
+                std::string logline;
+                int log_count = 0;
+                while (std::getline(ifs, logline)) {
+                    std::cout << logline << "\n";
+                    log_count++;
+                }
+                ifs.close();
+
+                int current_line = log_count;
+                int total_lines = config.prints_per_process;
+                std::cout << "\nCurrent instruction line: " << current_line << "\n";
+                std::cout << "Lines of code: " << total_lines << "\n";
+
+                if (session.finished) {
+                    std::cout << "\nFinished!\n";
+                }
+
+                std::cout << "\nroot:\\> ";
+                std::string proc_cmd;
+                if (!std::getline(std::cin, proc_cmd)) break;
+                proc_cmd = trim(proc_cmd);
+
+                if (proc_cmd == "exit") break;
+                else if (proc_cmd == "process-smi") {
+                    continue;
+                }
+                else if (proc_cmd == "pagetable") {
+                    displayPageTable(targetPid);
+                    std::cout << "Press Enter to continue...";
+                    std::cin.get();
+                }
+                else if (proc_cmd == "segments") {
+                    displayMemorySegments(targetPid);
+                    std::cout << "Press Enter to continue...";
+                    std::cin.get();
+                } else {
+                    std::cout << "Unknown command: '" << proc_cmd << "'\n";
+                    std::cout << "Available commands: exit, process-smi, pagetable, segments\n";
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                }
+            }
+            clearScreen();
+            printHeader();
+            continue;
+        }
 
         else if (cmd.rfind("screen -s ", 0) == 0) {
             std::string pname;
@@ -1735,7 +1867,7 @@ int main() {
             clearScreen();
             printHeader();
             continue;
-        }
+        } 
         else if (cmd == "screen -ls") {
             std::cout << "Finished:\n";
             for (const auto& entry : sessions) {
