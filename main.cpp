@@ -415,6 +415,47 @@ int main() {
         else if (cmd == "process-smi") {
             displayProcessSmi();
         }
+        else if (cmd.rfind("screen -r ", 0) == 0) {
+            std::string targetStr = trim(cmd.substr(9));
+            int targetPid = -1;
+            
+            // Try to interpret as PID first
+            try {
+                targetPid = std::stoi(targetStr);
+            } catch (const std::exception&) {
+                // If not a number, search by process name
+                for (const auto& pair : processNames) {
+                    if (pair.second == targetStr) {
+                        targetPid = pair.first;
+                        break;
+                    }
+                }
+            }
+            
+            if (targetPid == -1 || sessions.find(targetPid) == sessions.end()) {
+                std::cout << "Error: No such process found.\n";
+                std::cout << "Usage: screen -r <pid|name>\n";
+                continue;
+            }
+            
+            // Now we have a valid PID, show the process information and output
+            std::cout << "Process name: " << processNames[targetPid] << "\n";
+            std::cout << "ID: " << targetPid << "\n";
+            std::cout << "Memory size: " << sessions[targetPid].memorySize << " bytes\n";
+            
+            if (sessions[targetPid].memoryLayout) {
+                std::cout << "Pages needed: " << sessions[targetPid].memoryLayout->pageTable.numPages << "\n";
+            }
+            
+            std::cout << "\nProcess output:\n";
+            std::string fname = std::string("screen_") + (targetPid < 10 ? "0" : "") + std::to_string(targetPid) + ".txt";
+            std::ifstream ifs(fname);
+            std::string line;
+            while (std::getline(ifs, line)) {
+                std::cout << line << "\n";
+            }
+            ifs.close();
+        }
         else if (cmd == "help") {
             std::cout << "\nAvailable Commands:\n";
             std::cout << "  initialize                    - Initialize the system\n";
