@@ -29,13 +29,19 @@ void cpuWorkerWithInstructions(int coreId) {
 
         // Core is active for this tick
         total_cpu_active_ticks++;
-        sessions[pid].cpu_active_ticks++;
+        {
+            std::lock_guard<std::mutex> lock(sessionMutex);
+            sessions[pid].cpu_active_ticks++;
+        }
 
         if (pid == -1) continue;
 
         if (!sessions[pid].instructions.empty()) {
-            std::cout << "\nExecuting custom instructions for process " << pid 
-                      << " (" << processNames[pid] << "):\n";
+            {
+                std::lock_guard<std::mutex> lock(sessionMutex);
+                std::cout << "\nExecuting custom instructions for process " << pid 
+                          << " (" << processNames[pid] << "):\n";
+            }
             
             for (size_t i = 0; i < sessions[pid].instructions.size(); ++i) {
                 const auto& instruction = sessions[pid].instructions[i];
@@ -49,20 +55,29 @@ void cpuWorkerWithInstructions(int coreId) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             
-            std::cout << "Process " << pid << " (" << processNames[pid] << ") completed all instructions.\n\n";
+            {
+                std::lock_guard<std::mutex> lock(sessionMutex);
+                std::cout << "Process " << pid << " (" << processNames[pid] << ") completed all instructions.\n\n";
+            }
         } else {
             std::string fname = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid) + ".txt";
             std::ofstream ofs(fname.c_str(), std::ios::trunc);
             for (int i = 0; i < config.prints_per_process; ++i) {
                 auto now = Clock::now();
-                ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
-                    << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
+                {
+                    std::lock_guard<std::mutex> lock(sessionMutex);
+                    ofs << "(" << formatTimestamp(now) << ") Core:" << coreId
+                        << " \"Hello world from " << (processNames.count(pid) ? processNames[pid] : (std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid))) << "!\"\n";
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             ofs.close();
         }
 
-        sessions[pid].finished = true;
+        {
+            std::lock_guard<std::mutex> lock(sessionMutex);
+            sessions[pid].finished = true;
+        }
     }
 }
 
@@ -72,14 +87,17 @@ void schedulerThread() {
 
         for (int pid = 1; pid <= config.num_processes; ++pid) {
             readyQueue.push(pid);
-            Session s;
-            s.start = Clock::now();
-            s.finished = false;
-            s.memorySize = config.mem_per_proc;
-            sessions[pid] = std::move(s);
-            processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
+            {
+                std::lock_guard<std::mutex> lock(sessionMutex);
+                Session s;
+                s.start = Clock::now();
+                s.finished = false;
+                s.memorySize = config.mem_per_proc;
+                sessions[pid] = std::move(s);
+                processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
 
-            createProcessMemoryLayout(pid, config.mem_per_proc);
+                createProcessMemoryLayout(pid, config.mem_per_proc);
+            }
         }
 
         int currentCore = 0;
@@ -100,14 +118,16 @@ void schedulerThread() {
             std::this_thread::sleep_for(std::chrono::milliseconds(config.quantum_cycles));
             // snapshotMemory(); // This function needs to be available
 
-            if (!sessions[pid].finished) {
-                readyQueue.push(pid);
-            } else {
-                // freeMemory(pid); // This function needs to be available
-                demandPagingAllocator.freeProcessPages(pid);
+            {
+                std::lock_guard<std::mutex> lock(sessionMutex);
+                if (!sessions[pid].finished) {
+                    readyQueue.push(pid);
+                } else {
+                    // freeMemory(pid); // This function needs to be available
+                    demandPagingAllocator.freeProcessPages(pid);
+                }
             }
-
-            currentCore = (currentCore + 1) % config.num_cpu;
+        currentCore = (currentCore + 1) % config.num_cpu;
         }
 
         stopScheduler = true;
@@ -121,14 +141,17 @@ void schedulerThread() {
                 std::lock_guard<std::mutex> lock(coreMutexes[assignedCore]);
                 coreQueues[assignedCore].push(pid);
 
-                Session s;
-                s.start = Clock::now();
-                s.finished = false;
-                s.memorySize = config.mem_per_proc;
-                sessions[pid] = std::move(s);
-                processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
-                
-                createProcessMemoryLayout(pid, config.mem_per_proc);
+                {
+                    std::lock_guard<std::mutex> lock(sessionMutex);
+                    Session s;
+                    s.start = Clock::now();
+                    s.finished = false;
+                    s.memorySize = config.mem_per_proc;
+                    sessions[pid] = std::move(s);
+                    processNames[pid] = std::string("screen_") + (pid < 10 ? "0" : "") + std::to_string(pid);
+                    
+                    createProcessMemoryLayout(pid, config.mem_per_proc);
+                }
             }
             coreCVs[assignedCore].notify_one();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));

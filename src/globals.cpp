@@ -10,6 +10,7 @@ std::vector<std::condition_variable> coreCVs;
 
 std::vector<MemoryBlock> memoryBlocks;
 std::mutex memoryMutex;
+std::mutex sessionMutex;
 int snapshotCounter = 0;
 bool enableSnapshots = false;
 

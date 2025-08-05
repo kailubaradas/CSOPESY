@@ -20,6 +20,7 @@ extern std::vector<std::condition_variable> coreCVs;
 
 extern std::vector<MemoryBlock> memoryBlocks;
 extern std::mutex memoryMutex;
+extern std::mutex sessionMutex;
 extern int snapshotCounter;
 extern bool enableSnapshots;
 
